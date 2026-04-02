@@ -9,6 +9,7 @@
 - Spawns and maintains a configurable number of dummy bots.
 - Lets bot difficulty and bot AI mode be changed independently.
 - Supports a `Realistic` AI overlay for faction-aware target selection, LOS-only firing, target memory, reacquire delay, aim settling, and post-reload head lock.
+- Caches each managed bot's last non-spectator role so manual in-game role changes can persist across that bot's future respawns.
 - Refills and manages bot/human loadouts, reserve ammo, and bot weapon equip fallback.
 
 ## Repository Layout
@@ -53,8 +54,8 @@
 5. `SpawnBot()` creates dummy players and tracks them in `_managedBots`.
 6. `ConfigureSpawnedBot()` applies the bot loadout, resets runtime state, and schedules the bot brain.
 7. `RunBotBrain()` performs the bot loop:
-   - update stuck state
    - select a target
+   - decide whether movement is actually expected this tick, then update stuck state
    - move toward or around that target
    - ensure a firearm is equipped
    - aim
@@ -140,6 +141,11 @@ Remote Admin:
 - `warmup set <bots|humanrespawn|botrespawn|humanrole|botrole|forceroundstart|suppressroundend|keepmagfilled|aimode> <value>`
 - `modhelp`
 
+Notes:
+
+- `warmup set botrole <RoleTypeId>` updates the default role used for newly spawned bots and for bots that do not have a per-bot cached respawn role.
+- If you use the game's own role-changing commands on a managed bot, the plugin now remembers that bot's last non-spectator role and respawns that specific bot back into that role after death.
+
 Player/client:
 
 - `loadout`
@@ -167,8 +173,19 @@ Important `bot_behavior` fields:
 - `min_shot_interval_ms`
 - `preferred_range`
 - `range_tolerance`
+- `nav_debug_logging`
 - `keep_magazine_filled`
 - `target_aim_height_offset`
+- adaptive close-range movement tuning such as:
+  - `enable_adaptive_close_range_strafing`
+  - `close_range_strafe_distance`
+  - `very_close_range_strafe_distance`
+  - `close_range_strafe_repeat_count`
+  - `very_close_range_strafe_repeat_count`
+  - `enable_adaptive_close_range_retreat`
+  - `retreat_start_distance_buffer`
+  - `close_range_retreat_repeat_count`
+  - `very_close_range_retreat_repeat_count`
 - realistic combat tuning such as:
   - `realistic_sight_memory_ms`
   - `realistic_reacquire_delay_ms`
@@ -213,8 +230,11 @@ Common log families:
   Fire attempts, cooldown skips, release actions, and post-shot verification.
 - `[BotDebug:...] reload-*`
   Reload attempts and reload events.
+- `[BotNav:...]`
+  Movement-state, movement-branch, and pathing/unstuck diagnostics such as `move-state state=chase|hold|retreat`.
 
 `realistic_los_debug_logging` is useful when tuning `Realistic` mode LOS behavior.
+`nav_debug_logging` is useful when tuning spacing, chase/retreat thresholds, strafing, and stuck detection.
 
 ## Current Architecture Notes
 

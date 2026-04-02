@@ -41,6 +41,7 @@ This is persistent per-bot runtime state across the active life of a managed dum
 
 - identity (`PlayerId`, `Nickname`)
 - bot brain token
+- cached per-bot respawn role
 - aim and debug timing state
 - movement state
 - pending shot verification state
@@ -125,6 +126,8 @@ Owns:
 - crowd avoidance
 - stuck detection integration
 - unstuck behavior
+- close-range adaptive strafe/retreat selection
+- `BotNav` movement-state logging
 
 The bot brain gives it a target position, not a target player, so remembered-target movement can still work when LOS is lost.
 
@@ -136,7 +139,7 @@ Order of operations:
 
 1. reject stale generation or stale brain token
 2. reject dead/destroyed/spectator dummies
-3. update stuck state
+3. determine whether movement is expected this tick, then update stuck state
 4. select a target through `BotTargetingService`
 5. move through `BotMovementService`
 6. equip firearm through `BotCombatService`
@@ -164,13 +167,14 @@ When a managed human spawns:
 When a bot is created:
 
 1. `SpawnBot()` creates a dummy and allocates `ManagedBotState`
-2. `ActivateSpawnedBot()` assigns the configured bot role
+2. `ActivateSpawnedBot()` assigns the per-bot cached respawn role, falling back to the configured bot role
 3. `ScheduleInitialBotActivation()` retries until the dummy is ready for combat actions
 4. `ConfigureSpawnedBot()` applies loadout, resets state, and starts the bot brain
 
 On death:
 
 - the bot entry is kept
+- the bot's last non-spectator role is cached before respawn scheduling
 - its brain token increments
 - respawn is scheduled
 - stale delayed actions are ignored because the token changed
