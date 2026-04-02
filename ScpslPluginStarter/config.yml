@@ -1,0 +1,180 @@
+auto_start_on_waiting_for_players: false
+auto_start_on_first_player: false
+auto_start_on_round_started: true
+force_round_start_on_first_player: true
+suppress_round_end: true
+broadcast_warmup_status: true
+enable_debug_logging: false
+bot_count: 6
+bot_name_prefix: WarmupBot
+initial_setup_delay_ms: 1000
+join_setup_delay_ms: 1200
+human_respawn_delay_ms: 1200
+bot_respawn_delay_ms: 2500
+bot_spawn_delay_ms: 5000
+bot_role_assign_delay_ms: 1000
+bot_initial_activation_delay_ms: 700
+bot_activation_retry_delay_ms: 450
+bot_activation_max_attempts: 6
+human_role: NtfPrivate
+bot_role: ChaosRifleman
+difficulty_preset: Normal
+
+human_loadout_presets:
+- name: NtfPrivate
+  description: Spawn as NTF Private with default class gear.
+  role: NtfPrivate
+  use_role_default_loadout: true
+- name: NtfSergeant
+  description: Spawn as NTF Sergeant with default class gear.
+  role: NtfSergeant
+  use_role_default_loadout: true
+- name: NtfCaptain
+  description: Spawn as NTF Captain with default class gear.
+  role: NtfCaptain
+  use_role_default_loadout: true
+- name: Guard
+  description: Spawn as Facility Guard with default class gear.
+  role: FacilityGuard
+  use_role_default_loadout: true
+- name: ChaosRepressor
+  description: Spawn as Chaos Repressor with default class gear.
+  role: ChaosRepressor
+  use_role_default_loadout: true
+- name: CiInsurgent
+  description: Spawn as Chaos Insurgent with default class gear.
+  role: ChaosConscript
+  use_role_default_loadout: true
+- name: ChaosMarauder
+  description: Spawn as Chaos Marauder with default class gear.
+  role: ChaosMarauder
+  use_role_default_loadout: true
+- name: Rifle
+  description: NTF Private with E11 rifle kit.
+  role: NtfPrivate
+  use_role_default_loadout: false
+  loadout:
+    clear_inventory: true
+    infinite_reserve_ammo: true
+    equip_first_firearm: true
+    refill_active_firearm_on_spawn: true
+    items:
+    - GunE11SR
+    - ArmorCombat
+    - Medkit
+    - GrenadeFlash
+    ammo:
+    - type: Ammo556x45
+      amount: 240
+- name: AK
+  description: NTF Private with AK pressure setup.
+  role: NtfPrivate
+  use_role_default_loadout: false
+  loadout:
+    clear_inventory: true
+    infinite_reserve_ammo: true
+    equip_first_firearm: true
+    refill_active_firearm_on_spawn: true
+    items:
+    - GunAK
+    - ArmorCombat
+    - Medkit
+    - GrenadeFlash
+    ammo:
+    - type: Ammo762x39
+      amount: 180
+- name: SMG
+  description: NTF Private with Crossvec close-range setup.
+  role: NtfPrivate
+  use_role_default_loadout: false
+  loadout:
+    clear_inventory: true
+    infinite_reserve_ammo: true
+    equip_first_firearm: true
+    refill_active_firearm_on_spawn: true
+    items:
+    - GunCrossvec
+    - ArmorCombat
+    - Medkit
+    - GrenadeFlash
+    ammo:
+    - type: Ammo9x19
+      amount: 240
+
+human_loadout:
+  clear_inventory: true
+  infinite_reserve_ammo: true
+  equip_first_firearm: true
+  refill_active_firearm_on_spawn: true
+  items:
+  - GunE11SR
+  - ArmorCombat
+  - Medkit
+  - GrenadeFlash
+  ammo:
+  - type: Ammo556x45
+    amount: 240
+
+bot_loadout:
+  clear_inventory: true
+  infinite_reserve_ammo: true
+  equip_first_firearm: true
+  refill_active_firearm_on_spawn: true
+  items:
+  - GunCrossvec
+  - ArmorLight
+  - Medkit
+  ammo:
+  - type: Ammo9x19
+    amount: 240
+
+bot_behavior:
+  ai_mode: Classic
+  enable_combat_actions: true
+  enable_step_movement: true
+  enable_obstacle_navigation: true
+  enable_vertical_aim: true
+  target_aim_height_offset: 1.1
+  realistic_sight_memory_ms: 5000
+  realistic_reacquire_delay_ms: 250
+  realistic_initial_yaw_offset_max_degrees: 8.0
+  realistic_initial_pitch_offset_max_degrees: 0.0
+  realistic_aim_settle_ms: 1300
+  realistic_reload_lock_offset_max_degrees: 0.75
+  realistic_head_aim_height_offset: 1.45
+  realistic_los_debug_logging: false
+  max_vertical_aim_degrees: 25.0
+  refill_ammo_between_bursts: true
+  keep_magazine_filled: false
+  use_zoom_while_shooting: false
+  think_interval_min_ms: 450
+  think_interval_max_ms: 850
+  min_shot_interval_ms: 140
+  min_reload_attempt_interval_ms: 450
+  shoot_release_delay_ms: 40
+  debug_log_interval_ms: 800
+  unstuck_duration_ms: 900
+  stuck_tick_threshold: 2
+  nav_waypoint_reach_distance: 0.9
+  nav_recompute_interval_ms: 350
+  nav_path_failed_cooldown_ms: 350
+  nav_probe_distance: 2.5
+  nav_lateral_probe_count: 3
+  nav_target_move_recompute_distance: 1.75
+  nav_debug_logging: true
+  linear_move_tick_threshold: 3
+  random_strafe_after_linear_chance_percent: 85
+  strafe_direction_change_chance_percent: 35
+  preferred_range: 14.0
+  range_tolerance: 2.5
+  stuck_distance_threshold: 0.45
+  nearby_bot_avoidance_radius: 1.35
+  max_horizontal_aim_actions_per_tick: 3
+  max_vertical_aim_actions_per_tick: 2
+  horizontal_aim_deadzone_degrees: 1.5
+  vertical_aim_deadzone_degrees: 1.0
+  shoot_press_action_name: Shoot->Click
+  shoot_release_action_name: Shoot->Release
+  alternate_shoot_press_action_name: ""
+  reload_action_name: Reload->Click
+  zoom_action_name: Zoom->Click

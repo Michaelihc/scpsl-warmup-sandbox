@@ -13,7 +13,7 @@ public sealed class LoadoutCommand : ICommand
 
     public string[] Aliases => new[] { "ld", "kit" };
 
-    public string Description => "Shows and selects your warmup human loadout preset.";
+    public string Description => "Shows and selects your warmup human spawn preset.";
 
     public bool Execute(ArraySegment<string> arguments, ICommandSender sender, out string response)
     {
@@ -43,6 +43,6 @@ public sealed class LoadoutCommand : ICommand
 
     private static string GetArgument(ArraySegment<string> arguments, int index)
     {
-        return arguments.Array![arguments.Offset + index];
+        return arguments.Array![arguments.Offset + index]!;
     }
 }

@@ -24,8 +24,11 @@ public sealed class ModHelpCommand : ICommand
             "warmup stop\n" +
             "warmup save\n" +
             "warmup difficulty <easy|normal|hard|hardest>\n" +
-            "warmup set <bots|humanrespawn|botrespawn|humanrole|botrole|forceroundstart|suppressroundend|keepmagfilled> <value>\n" +
-            "Aliases: warmup, ws, warmupsandbox";
+            "warmup aimode <classic|realistic>\n" +
+            "warmup set <bots|humanrespawn|botrespawn|humanrole|botrole|forceroundstart|suppressroundend|keepmagfilled|aimode> <value>\n" +
+            "loadout\n" +
+            "loadout <number|preset|role>\n" +
+            "Aliases: warmup, ws, warmupsandbox | loadout, ld, kit";
         return true;
     }
 }

@@ -60,10 +60,19 @@ public sealed class WarmupCommand : ICommand
 
                 return plugin.ApplyDifficultyPreset(GetArgument(arguments, 1), out response);
 
+            case "aimode":
+                if (arguments.Count < 2)
+                {
+                    response = "Usage: warmup aimode <classic|realistic>";
+                    return false;
+                }
+
+                return plugin.ApplyAiMode(GetArgument(arguments, 1), out response);
+
             case "set":
                 if (arguments.Count < 3)
                 {
-                    response = "Usage: warmup set <bots|humanrespawn|botrespawn|humanrole|botrole|forceroundstart|suppressroundend|keepmagfilled> <value>";
+                    response = "Usage: warmup set <bots|humanrespawn|botrespawn|humanrole|botrole|forceroundstart|suppressroundend|keepmagfilled|aimode> <value>";
                     return false;
                 }
 
@@ -83,11 +92,11 @@ public sealed class WarmupCommand : ICommand
 
     private static string GetArgument(ArraySegment<string> arguments, int index)
     {
-        return arguments.Array![arguments.Offset + index];
+        return arguments.Array![arguments.Offset + index]!;
     }
 
     private static string BuildHelp()
     {
-        return "warmup status | start | restart | roundrestart | stop | save | difficulty <easy|normal|hard|hardest> | set <bots|humanrespawn|botrespawn|humanrole|botrole|forceroundstart|suppressroundend|keepmagfilled> <value>";
+        return "warmup status | start | restart | roundrestart | stop | save | difficulty <easy|normal|hard|hardest> | aimode <classic|realistic> | set <bots|humanrespawn|botrespawn|humanrole|botrole|forceroundstart|suppressroundend|keepmagfilled|aimode> <value>";
     }
 }

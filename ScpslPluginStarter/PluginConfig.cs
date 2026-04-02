@@ -18,7 +18,7 @@ public sealed class PluginConfig
 
     public bool BroadcastWarmupStatus { get; set; } = true;
 
-    public bool EnableDebugLogging { get; set; } = true;
+    public bool EnableDebugLogging { get; set; } = false;
 
     public int BotCount { get; set; } = 6;
 
@@ -63,6 +63,12 @@ public enum WarmupDifficulty
     Normal,
     Hard,
     Hardest,
+}
+
+public enum WarmupAiMode
+{
+    Classic,
+    Realistic,
 }
 
 public sealed class LoadoutDefinition
@@ -121,7 +127,11 @@ public sealed class NamedLoadoutDefinition
 
     public string Description { get; set; } = "";
 
-    public LoadoutDefinition Loadout { get; set; } = LoadoutDefinition.CreateDefaultHuman();
+    public RoleTypeId Role { get; set; } = RoleTypeId.NtfPrivate;
+
+    public bool UseRoleDefaultLoadout { get; set; }
+
+    public LoadoutDefinition? Loadout { get; set; } = LoadoutDefinition.CreateDefaultHuman();
 
     public static NamedLoadoutDefinition[] CreateDefaultHumanPresets()
     {
@@ -129,14 +139,74 @@ public sealed class NamedLoadoutDefinition
         {
             new NamedLoadoutDefinition
             {
+                Name = "NtfPrivate",
+                Description = "Spawn as NTF Private with default class gear.",
+                Role = RoleTypeId.NtfPrivate,
+                UseRoleDefaultLoadout = true,
+                Loadout = null,
+            },
+            new NamedLoadoutDefinition
+            {
+                Name = "NtfSergeant",
+                Description = "Spawn as NTF Sergeant with default class gear.",
+                Role = RoleTypeId.NtfSergeant,
+                UseRoleDefaultLoadout = true,
+                Loadout = null,
+            },
+            new NamedLoadoutDefinition
+            {
+                Name = "NtfCaptain",
+                Description = "Spawn as NTF Captain with default class gear.",
+                Role = RoleTypeId.NtfCaptain,
+                UseRoleDefaultLoadout = true,
+                Loadout = null,
+            },
+            new NamedLoadoutDefinition
+            {
+                Name = "Guard",
+                Description = "Spawn as Facility Guard with default class gear.",
+                Role = RoleTypeId.FacilityGuard,
+                UseRoleDefaultLoadout = true,
+                Loadout = null,
+            },
+            new NamedLoadoutDefinition
+            {
+                Name = "ChaosRepressor",
+                Description = "Spawn as Chaos Repressor with default class gear.",
+                Role = RoleTypeId.ChaosRepressor,
+                UseRoleDefaultLoadout = true,
+                Loadout = null,
+            },
+            new NamedLoadoutDefinition
+            {
+                Name = "CiInsurgent",
+                Description = "Spawn as Chaos Insurgent with default class gear.",
+                Role = RoleTypeId.ChaosConscript,
+                UseRoleDefaultLoadout = true,
+                Loadout = null,
+            },
+            new NamedLoadoutDefinition
+            {
+                Name = "ChaosMarauder",
+                Description = "Spawn as Chaos Marauder with default class gear.",
+                Role = RoleTypeId.ChaosMarauder,
+                UseRoleDefaultLoadout = true,
+                Loadout = null,
+            },
+            new NamedLoadoutDefinition
+            {
                 Name = "Rifle",
-                Description = "E11 rifle with armor and flash.",
+                Description = "NTF Private with E11 rifle kit.",
+                Role = RoleTypeId.NtfPrivate,
+                UseRoleDefaultLoadout = false,
                 Loadout = LoadoutDefinition.CreateDefaultHuman(),
             },
             new NamedLoadoutDefinition
             {
                 Name = "AK",
-                Description = "AK pressure setup.",
+                Description = "NTF Private with AK pressure setup.",
+                Role = RoleTypeId.NtfPrivate,
+                UseRoleDefaultLoadout = false,
                 Loadout = new LoadoutDefinition
                 {
                     Items = new[]
@@ -155,7 +225,9 @@ public sealed class NamedLoadoutDefinition
             new NamedLoadoutDefinition
             {
                 Name = "SMG",
-                Description = "Crossvec close-range setup.",
+                Description = "NTF Private with Crossvec close-range setup.",
+                Role = RoleTypeId.NtfPrivate,
+                UseRoleDefaultLoadout = false,
                 Loadout = new LoadoutDefinition
                 {
                     Items = new[]
@@ -184,13 +256,33 @@ public sealed class AmmoGrant
 
 public sealed class BotBehaviorDefinition
 {
+    public WarmupAiMode AiMode { get; set; } = WarmupAiMode.Classic;
+
     public bool EnableCombatActions { get; set; } = true;
 
     public bool EnableStepMovement { get; set; } = true;
 
+    public bool EnableObstacleNavigation { get; set; } = true;
+
     public bool EnableVerticalAim { get; set; } = true;
 
     public float TargetAimHeightOffset { get; set; } = 1.1f;
+
+    public int RealisticSightMemoryMs { get; set; } = 5000;
+
+    public int RealisticReacquireDelayMs { get; set; } = 250;
+
+    public float RealisticInitialYawOffsetMaxDegrees { get; set; } = 8.0f;
+
+    public float RealisticInitialPitchOffsetMaxDegrees { get; set; } = 0f;
+
+    public int RealisticAimSettleMs { get; set; } = 1300;
+
+    public float RealisticReloadLockOffsetMaxDegrees { get; set; } = 0.75f;
+
+    public float RealisticHeadAimHeightOffset { get; set; } = 1.45f;
+
+    public bool RealisticLosDebugLogging { get; set; } = false;
 
     public float MaxVerticalAimDegrees { get; set; } = 25.0f;
 
@@ -204,7 +296,7 @@ public sealed class BotBehaviorDefinition
 
     public int ThinkIntervalMaxMs { get; set; } = 850;
 
-    public int MinShotIntervalMs { get; set; } = 180;
+    public int MinShotIntervalMs { get; set; } = 140;
 
     public int MinReloadAttemptIntervalMs { get; set; } = 450;
 
@@ -216,11 +308,43 @@ public sealed class BotBehaviorDefinition
 
     public int StuckTickThreshold { get; set; } = 2;
 
+    public float NavWaypointReachDistance { get; set; } = 0.9f;
+
+    public int NavRecomputeIntervalMs { get; set; } = 350;
+
+    public int NavPathFailedCooldownMs { get; set; } = 350;
+
+    public float NavProbeDistance { get; set; } = 2.5f;
+
+    public int NavLateralProbeCount { get; set; } = 3;
+
+    public float NavTargetMoveRecomputeDistance { get; set; } = 1.75f;
+
+    public bool NavDebugLogging { get; set; } = true;
+
     public int LinearMoveTickThreshold { get; set; } = 3;
 
     public int RandomStrafeAfterLinearChancePercent { get; set; } = 85;
 
     public int StrafeDirectionChangeChancePercent { get; set; } = 35;
+
+    public bool EnableAdaptiveCloseRangeStrafing { get; set; } = false;
+
+    public float CloseRangeStrafeDistance { get; set; } = 10.0f;
+
+    public float VeryCloseRangeStrafeDistance { get; set; } = 6.0f;
+
+    public int CloseRangeStrafeRepeatCount { get; set; } = 2;
+
+    public int VeryCloseRangeStrafeRepeatCount { get; set; } = 3;
+
+    public bool EnableAdaptiveCloseRangeRetreat { get; set; } = false;
+
+    public float RetreatStartDistanceBuffer { get; set; } = 0.0f;
+
+    public int CloseRangeRetreatRepeatCount { get; set; } = 2;
+
+    public int VeryCloseRangeRetreatRepeatCount { get; set; } = 3;
 
     public float PreferredRange { get; set; } = 14.0f;
 
