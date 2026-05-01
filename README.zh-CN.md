@@ -12,8 +12,11 @@
 
 - 根据配置在回合开始、首名玩家加入或等待玩家阶段自动启动热身。
 - 自动生成并维护指定数量的假人机器人。
+- 没有真人玩家在线时，可自动把机器人数量恢复到空服默认值。
 - 支持运行时修改机器人数量、难度、AI 模式、地图模式、SCP 速度和近距离后退倍率。
-- 玩家可以用 `loadout`、`ld` 或 `kit` 选择出生预设。
+- 玩家可以用 `loadout`、`ld` 或 `kit` 选择出生预设，也可以原地临时切换为 SCP 练习角色。
+- 面向玩家的 `.help`、`.bots setcount <数量>` 和 `.ra` 命令带冷却限制。
+- 受限玩家 Remote Admin 窗口只允许 `forcerole`、`bring`、`goto` 和 `give`。
 - 支持职业默认装备，也支持完全自定义装备和备用弹药。
 - 对职业默认装备也会按当前枪械弹药类型补充备用弹药，包括 9x19。
 - 使用 SCP:SL 原生回合出生保护。
@@ -71,7 +74,78 @@ scripts\host-warmup-server.bat --server "D:\Servers\SCP Secret Laboratory Dedica
 scripts\host-warmup-server.bat --port 7778
 ```
 
-脚本不会覆盖已有的线上配置。
+脚本默认不会覆盖已有的线上插件配置。
+
+### 中文公测服推荐配置
+
+如果要直接开中文公测服，可以让脚本顺手配置 SCP:SL 原生服务器标题和人数上限：
+
+```bat
+scripts\host-warmup-server.bat --configure-cn-public --start
+```
+
+这会修改：
+
+```text
+%AppData%\SCP Secret Laboratory\config\7777\config_gameplay.txt
+```
+
+推荐值：
+
+```yaml
+server_name: [CN] [公测] 人机战斗服
+player_list_title: [CN] [公测] 人机战斗服
+max_players: 50
+```
+
+服务器简介建议使用非技术描述，让玩家一眼看懂这里能做什么。模板在：
+
+```text
+docs\server-description.zh-CN.txt
+```
+
+把模板内容发布到 Pastebin 后，把 Pastebin ID 填到原生配置：
+
+```yaml
+serverinfo_pastebin_id: 你的PastebinID
+```
+
+也可以让脚本一起写入：
+
+```bat
+scripts\host-warmup-server.bat --configure-cn-public --server-info-id 你的PastebinID --start
+```
+
+简介重点：
+
+- 这是人机练枪和热身服务器。
+- 服务器会自动生成机器人。
+- 所有玩家都有受限管理面板，可临时切角色、传送和发物品。
+- 输入 `.help` 查看玩家命令。
+- 服务器仍在公测开发中。
+
+脚本会先创建一次备份：
+
+```text
+config_gameplay.txt.warmup-cn-public-backup
+```
+
+只配置原生服务器信息、不构建插件时，也可以单独运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\configure-cn-public-server.ps1 -Port 7777
+```
+
+空服时建议保留 5 个机器人，让新玩家进服后马上能练枪：
+
+```yaml
+max_bot_count: 30
+reset_bot_count_when_no_active_players: true
+no_active_players_bot_count: 5
+no_active_players_bot_reset_delay_ms: 3000
+```
+
+`max_bot_count` 会限制命令和配置里的机器人数量，避免玩家把机器人刷得太多。空服重置只改运行时机器人数量，不会把玩家用 `.bots setcount` 改过的数值写回配置文件。下一次有人进服后仍可重新用命令调整。
 
 ## 手动构建
 
@@ -173,6 +247,7 @@ bots map bomb
 ```text
 bots
 modhelp
+.help
 ```
 
 玩家出生预设：
@@ -180,6 +255,7 @@ modhelp
 ```text
 loadout
 loadout <编号|预设|角色>
+loadout <173|939|106|049|3114|096>
 ```
 
 别名：
@@ -188,6 +264,23 @@ loadout <编号|预设|角色>
 ld
 kit
 ```
+
+面向玩家的命令：
+
+```text
+.help
+.loadout
+.loadout <编号|名称>
+.loadout <173|939|106|049|3114|096>
+.bots setcount <数量>
+.ra
+```
+
+临时 SCP 练习角色会在当前位置切换，清空物品和弹药，并且不会变成你的永久出生预设。死亡后会恢复到上一次选择的人类预设。
+
+`.bots setcount <数量>` 允许玩家修改机器人数量，默认有 60 秒全局冷却，以及每名玩家 3 分钟加 0-60 秒随机时间的个人冷却。
+
+`.ra` 会打开一个短时间受限 Remote Admin 窗口。非管理员玩家只能使用 `forcerole`、`bring`、`goto` 和 `give`，其他 RA 命令会被拦截。默认窗口为 20 秒，结束后进入全局冷却和个人冷却。如果修改 RA 窗口时长，个人冷却会按配置中的 20 秒基准等比例缩放。
 
 ## 配置
 
@@ -201,6 +294,10 @@ ScpslPluginStarter\config.yml
 
 - `language`
 - `bot_count`
+- `max_bot_count`
+- `reset_bot_count_when_no_active_players`
+- `no_active_players_bot_count`
+- `no_active_players_bot_reset_delay_ms`
 - `difficulty_preset`
 - `human_role`
 - `bot_role`
@@ -208,6 +305,14 @@ ScpslPluginStarter\config.yml
 - `enable_spawn_protection`
 - `auto_cleanup_enabled`
 - `auto_cleanup_interval_seconds`
+- `player_bot_count_global_cooldown_seconds`
+- `player_bot_count_cooldown_seconds`
+- `player_bot_count_cooldown_jitter_seconds`
+- `limited_remote_admin_enabled`
+- `limited_remote_admin_use_window_seconds`
+- `limited_remote_admin_global_cooldown_seconds`
+- `limited_remote_admin_cooldown_seconds`
+- `limited_remote_admin_cooldown_jitter_seconds`
 - `dust2_map`
 - `bot_behavior`
 

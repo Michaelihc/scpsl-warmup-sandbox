@@ -93,10 +93,12 @@ internal sealed class HumanPresetService
             string gearLabel = preset.UseRoleDefaultLoadout
                 ? WarmupLocalization.T("default gear", "默认装备")
                 : WarmupLocalization.T("custom gear", "自定义装备");
-            lines.Add($"{marker} {i + 1}. {preset.Name} [{preset.Role}] - {gearLabel} - {preset.Description}");
+            lines.Add($"{marker} {i + 1}. {preset.Name} [{preset.Role}] - {gearLabel}");
         }
 
-        lines.Add(WarmupLocalization.T("Use `loadout <number|name>` to apply.", "使用 `loadout <编号|名称>` 应用。"));
+        lines.Add(WarmupLocalization.T(
+            "Use `.loadout <number|name>` or `.loadout <173|939|106|049|3114|096>`. Use `.help` for help.",
+            "使用 `.loadout <编号|名称>` 或 `.loadout <173|939|106|049|3114|096>`。输入 `.help` 查看帮助。"));
         return string.Join("\n", lines);
     }
 }

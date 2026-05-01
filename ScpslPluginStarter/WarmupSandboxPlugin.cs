@@ -13,6 +13,7 @@ using InventorySystem.Items.Firearms.Attachments;
 using LabApi.Events.Arguments.PlayerEvents;
 using LabApi.Events.Arguments.ServerEvents;
 using LabApi.Events.Handlers;
+using LabApi.Features.Enums;
 using LabApi.Features.Wrappers;
 using LabApi.Loader.Features.Plugins;
 using MapGeneration;
@@ -58,9 +59,23 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             null,
             new[] { typeof(ReferenceHub), typeof(ItemType), typeof(uint) },
             null);
+    private static readonly MethodInfo? OpenRemoteAdminMethod = typeof(ServerRoles)
+        .GetMethod("OpenRemoteAdmin", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+    private static readonly MethodInfo? TargetSetRemoteAdminMethod = typeof(ServerRoles)
+        .GetMethod(
+            "TargetSetRemoteAdmin",
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            null,
+            new[] { typeof(bool) },
+            null);
+    private static readonly FieldInfo? RemoteAdminFlagField = typeof(ServerRoles)
+        .GetField("RemoteAdmin", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
     private readonly Dictionary<int, ManagedBotState> _managedBots = new();
     private readonly Dictionary<int, string> _selectedHumanLoadouts = new();
+    private readonly Dictionary<int, long> _playerBotCountCooldownUntilMs = new();
+    private readonly Dictionary<int, long> _limitedRemoteAdminCooldownUntilMs = new();
+    private readonly Dictionary<int, long> _limitedRemoteAdminWindowUntilMs = new();
     private readonly System.Random _random = new();
     private readonly HumanPresetService _humanPresetService = new();
     private readonly BotCombatService _botCombatService = new();
@@ -73,6 +88,8 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private int _botSequence;
     private int _warmupGeneration;
     private int _roundCampDisabledUntilTick;
+    private long _playerBotCountGlobalCooldownUntilMs;
+    private long _limitedRemoteAdminGlobalCooldownUntilMs;
     private bool _warmupActive;
 
     public static WarmupSandboxPlugin? Instance { get; private set; }
@@ -92,6 +109,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         ServerEvents.RoundStarted += OnRoundStarted;
         ServerEvents.RoundRestarted += OnRoundRestarted;
         ServerEvents.RoundEndingConditionsCheck += OnRoundEndingConditionsCheck;
+        ServerEvents.CommandExecuting += OnCommandExecuting;
         PlayerEvents.Joined += OnPlayerJoined;
         PlayerEvents.Spawned += OnPlayerSpawned;
         PlayerEvents.Death += OnPlayerDeath;
@@ -145,6 +163,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         PlayerEvents.Spawned -= OnPlayerSpawned;
         PlayerEvents.Joined -= OnPlayerJoined;
         ServerEvents.RoundEndingConditionsCheck -= OnRoundEndingConditionsCheck;
+        ServerEvents.CommandExecuting -= OnCommandExecuting;
         ServerEvents.RoundRestarted -= OnRoundRestarted;
         ServerEvents.RoundStarted -= OnRoundStarted;
         ServerEvents.WaitingForPlayers -= OnWaitingForPlayers;
@@ -185,6 +204,46 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         {
             ev.CanEnd = false;
         }
+    }
+
+    private void OnCommandExecuting(CommandExecutingEventArgs ev)
+    {
+        if (ev.CommandType != CommandType.RemoteAdmin
+            || ev.Sender == null
+            || ev.Command == null
+            || !Player.TryGet(ev.Sender, out Player player)
+            || IsPrivilegedCommandSender(ev.Sender))
+        {
+            return;
+        }
+
+        string commandName = ev.CommandName.ToLowerInvariant();
+        if (!IsLimitedRemoteAdminCommandAllowed(commandName))
+        {
+            ev.IsAllowed = false;
+            ev.Sender.RaReply(WarmupLocalization.T(
+                "Warmup limited RA only allows: forcerole, bring, goto, give. Use .help for help.",
+                "热身受限 RA 只允许：forcerole、bring、goto、give。输入 .help 查看帮助。"), false, true, string.Empty);
+            return;
+        }
+
+        if (!TryUseLimitedRemoteAdminWindow(player, out string response))
+        {
+            ev.IsAllowed = false;
+            ev.Sender.RaReply(response, false, true, string.Empty);
+            return;
+        }
+
+        if (ev.Sender is not RemoteAdmin.PlayerCommandSender playerCommandSender)
+        {
+            ev.IsAllowed = false;
+            ev.Sender.RaReply(WarmupLocalization.T(
+                "Limited RA is only available from the player Remote Admin panel.",
+                "受限 RA 只能从玩家 Remote Admin 面板使用。"), false, true, string.Empty);
+            return;
+        }
+
+        ev.Sender = new LimitedRemoteAdminCommandSender(playerCommandSender);
     }
 
     private void OnPlayerJoined(PlayerJoinedEventArgs ev)
@@ -341,11 +400,16 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private void OnPlayerLeft(PlayerLeftEventArgs ev)
     {
         _selectedHumanLoadouts.Remove(ev.Player.PlayerId);
+        _playerBotCountCooldownUntilMs.Remove(ev.Player.PlayerId);
+        _limitedRemoteAdminCooldownUntilMs.Remove(ev.Player.PlayerId);
+        _limitedRemoteAdminWindowUntilMs.Remove(ev.Player.PlayerId);
 
         if (RemoveManagedBot(ev.Player.PlayerId))
         {
             EnsureBotPopulation(_warmupGeneration);
         }
+
+        ScheduleNoActivePlayersBotReset();
     }
 
     private void OnPlayerShotWeapon(PlayerShotWeaponEventArgs ev)
@@ -474,9 +538,12 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             return;
         }
 
+        ClampConfiguredBotCount();
+
         if (!Player.List.Any(IsManagedHuman))
         {
             ApiLogger.Info($"[{Name}] Warmup setup deferred because no authenticated human players are present yet.");
+            ResetBotCountIfNoActivePlayers(generation);
             _warmupActive = false;
             return;
         }
@@ -510,8 +577,8 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             foreach (Player player in Player.List.Where(IsManagedHuman))
             {
                 player.SendHint(WarmupLocalization.T(
-                    $"{Name} active: {Config.BotCount} bots.",
-                    $"{Name} 已启用：{Config.BotCount} 个机器人。"), 4f);
+                    $"{Name} active: {Config.BotCount} bots. Use .help for commands.",
+                    $"{Name} 已启用：{Config.BotCount} 个机器人。输入 .help 查看命令。"), 4f);
             }
         }
     }
@@ -545,11 +612,67 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             return;
         }
 
+        ClampConfiguredBotCount();
         CleanupMissingBotEntries();
         while (_managedBots.Count < Config.BotCount)
         {
             SpawnBot(generation);
         }
+    }
+
+    private void ScheduleNoActivePlayersBotReset()
+    {
+        if (!Config.ResetBotCountWhenNoActivePlayers)
+        {
+            return;
+        }
+
+        int generation = _warmupGeneration;
+        Schedule(() => ResetBotCountIfNoActivePlayers(generation), Math.Max(0, Config.NoActivePlayersBotResetDelayMs));
+    }
+
+    private void ResetBotCountIfNoActivePlayers(int generation)
+    {
+        if (!Config.ResetBotCountWhenNoActivePlayers
+            || !IsCurrentGeneration(generation)
+            || Player.List.Any(IsManagedHuman))
+        {
+            return;
+        }
+
+        int idleBotCount = ClampBotCount(Config.NoActivePlayersBotCount);
+        if (Config.BotCount == idleBotCount)
+        {
+            return;
+        }
+
+        int previousBotCount = Config.BotCount;
+        Config.BotCount = idleBotCount;
+
+        if (_warmupActive)
+        {
+            EnsureBotPopulation(generation);
+            TrimExcessBots();
+        }
+
+        ApiLogger.Info($"[{Name}] No active human players remain; bot count reset from {previousBotCount} to {Config.BotCount}.");
+    }
+
+    private int ClampBotCount(int botCount)
+    {
+        return Math.Min(Math.Max(0, botCount), Math.Max(0, Config.MaxBotCount));
+    }
+
+    private void ClampConfiguredBotCount()
+    {
+        int clamped = ClampBotCount(Config.BotCount);
+        if (clamped == Config.BotCount)
+        {
+            return;
+        }
+
+        ApiLogger.Warn($"[{Name}] Configured bot count {Config.BotCount} exceeds max {Config.MaxBotCount}; clamping to {clamped}.");
+        Config.BotCount = clamped;
     }
 
     private void SpawnBot(int generation)
@@ -661,6 +784,12 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     private void ConfigureSpawnedHuman(Player player)
     {
+        if (player.Team == Team.SCPs)
+        {
+            RestoreVitals(player);
+            return;
+        }
+
         NamedLoadoutDefinition? preset = GetSelectedHumanPreset(player);
         LoadoutDefinition? loadout = GetHumanLoadout(player);
         if (!(preset?.UseRoleDefaultLoadout ?? false) && loadout != null)
@@ -1430,8 +1559,15 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     {
         if (!IsManagedHuman(player))
         {
-            response = "Only active human players can choose a loadout.";
+            response = WarmupLocalization.T(
+                "Only active human players can choose a loadout.",
+                "只有存活玩家可以选择预设。");
             return false;
+        }
+
+        if (TryGetTemporaryScpRole(selector, out RoleTypeId scpRole))
+        {
+            return TryApplyTemporaryScpRole(player, scpRole, out response);
         }
 
         NamedLoadoutDefinition? preset = FindHumanLoadoutPreset(selector);
@@ -1442,7 +1578,9 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
 
         _selectedHumanLoadouts[player.PlayerId] = preset.Name;
-        response = $"Selected preset: {preset.Name} ({preset.Role}).";
+        response = WarmupLocalization.T(
+            $"Selected preset: {preset.Name} ({preset.Role}).",
+            $"已选择预设：{preset.Name}（{preset.Role}）。");
 
         RoleTypeId selectedRole = preset.Role;
         bool shouldRespawnForPreset = preset.UseRoleDefaultLoadout || player.Role != selectedRole;
@@ -1452,8 +1590,8 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             {
                 player.SetRole(selectedRole, RoleChangeReason.RemoteAdmin, RoleSpawnFlags.All);
                 response += preset.UseRoleDefaultLoadout
-                    ? " Respawning now with role-default gear."
-                    : " Respawning now with the selected role.";
+                    ? WarmupLocalization.T(" Respawning now with role-default gear.", " 正在以职业默认装备重生。")
+                    : WarmupLocalization.T(" Respawning now with the selected role.", " 正在以所选职业重生。");
             }
             else if (preset.Loadout != null)
             {
@@ -1461,13 +1599,86 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                 RestoreVitals(player);
                 FirearmItem? firearm = player.CurrentItem as FirearmItem ?? player.Items.OfType<FirearmItem>().FirstOrDefault();
                 response += firearm == null
-                    ? " Applied immediately."
-                    : $" Applied immediately. Ammo={player.GetAmmo(firearm.AmmoType)}.";
+                    ? WarmupLocalization.T(" Applied immediately.", " 已立即应用。")
+                    : WarmupLocalization.T($" Applied immediately. Ammo={player.GetAmmo(firearm.AmmoType)}.", $" 已立即应用。弹药={player.GetAmmo(firearm.AmmoType)}。");
             }
         }
 
         ShowLoadoutMenuHint(player, 6f);
         return true;
+    }
+
+    private bool TryApplyTemporaryScpRole(Player player, RoleTypeId scpRole, out string response)
+    {
+        if (player.Role == RoleTypeId.Spectator)
+        {
+            response = WarmupLocalization.T(
+                "You must be spawned before using a temporary SCP practice role.",
+                "你需要先出生，才能临时切换为 SCP 练习角色。");
+            return false;
+        }
+
+        Vector3 position = player.Position;
+        Vector2 lookRotation = player.LookRotation;
+        player.ClearInventory();
+        player.ClearAmmo();
+        player.SetRole(scpRole, RoleChangeReason.RemoteAdmin, RoleSpawnFlags.None);
+        RestoreTemporaryScpPosition(player.PlayerId, scpRole, position, lookRotation, 50);
+        RestoreTemporaryScpPosition(player.PlayerId, scpRole, position, lookRotation, 250);
+        response = WarmupLocalization.T(
+            $"Temporary SCP practice role: {scpRole}. Your selected human loadout is unchanged for your next respawn.",
+            $"临时 SCP 练习角色：{scpRole}。你的下一次重生仍会使用之前选择的人类预设。");
+        player.SendHint(response, 5f);
+        return true;
+    }
+
+    private void RestoreTemporaryScpPosition(int playerId, RoleTypeId scpRole, Vector3 position, Vector2 lookRotation, int delayMs)
+    {
+        Schedule(() =>
+        {
+            if (!Player.TryGet(playerId, out Player livePlayer)
+                || livePlayer.IsDestroyed
+                || livePlayer.Role != scpRole)
+            {
+                return;
+            }
+
+            livePlayer.Position = position;
+            livePlayer.LookRotation = lookRotation;
+            livePlayer.ClearInventory();
+            livePlayer.ClearAmmo();
+            RestoreVitals(livePlayer);
+        }, delayMs);
+    }
+
+    private static bool TryGetTemporaryScpRole(string selector, out RoleTypeId role)
+    {
+        switch (selector.Trim().ToLowerInvariant().Replace("scp", string.Empty).Replace("-", string.Empty).Replace("_", string.Empty))
+        {
+            case "173":
+                role = RoleTypeId.Scp173;
+                return true;
+            case "939":
+                role = RoleTypeId.Scp939;
+                return true;
+            case "106":
+                role = RoleTypeId.Scp106;
+                return true;
+            case "049":
+            case "49":
+                role = RoleTypeId.Scp049;
+                return true;
+            case "3114":
+                role = RoleTypeId.Scp3114;
+                return true;
+            case "096":
+            case "96":
+                role = RoleTypeId.Scp096;
+                return true;
+            default:
+                role = RoleTypeId.None;
+                return false;
+        }
     }
 
     private void EnsureFirearmEquipped(Player player)
@@ -2503,6 +2714,28 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         return command.Execute(new ArraySegment<string>(arguments), AutoCleanupCommandSender.Instance, out response);
     }
 
+    private static bool IsPrivilegedCommandSender(CommandSender sender)
+    {
+        return sender.FullPermissions || sender.Permissions != 0UL;
+    }
+
+    private static bool IsLimitedRemoteAdminCommandAllowed(string commandName)
+    {
+        switch (commandName.ToLowerInvariant())
+        {
+            case "forcerole":
+            case "forceclass":
+            case "fr":
+            case "fc":
+            case "bring":
+            case "goto":
+            case "give":
+                return true;
+            default:
+                return false;
+        }
+    }
+
     private void SchedulePostShotVerification(int playerId, int brainToken, int generation)
     {
         Schedule(() =>
@@ -3239,6 +3472,232 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         return true;
     }
 
+    public bool TryPlayerSetBotCount(Player player, string value, out string response)
+    {
+        if (!int.TryParse(value, out int botCount) || botCount < 0)
+        {
+            response = WarmupLocalization.T(
+                "Bot count must be a non-negative integer.",
+                "机器人数量必须是非负整数。");
+            return false;
+        }
+
+        if (botCount > Config.MaxBotCount)
+        {
+            response = WarmupLocalization.T(
+                $"Bot count cannot exceed {Config.MaxBotCount}.",
+                $"机器人数量不能超过 {Config.MaxBotCount}。");
+            return false;
+        }
+
+        long now = NowMs();
+        if (TryGetCooldownRemainingSeconds(_playerBotCountGlobalCooldownUntilMs, now, out int globalRemaining))
+        {
+            response = WarmupLocalization.T(
+                $"Bot count is on global cooldown for {globalRemaining}s.",
+                $"机器人数量全局冷却中，还剩 {globalRemaining} 秒。");
+            return false;
+        }
+
+        if (_playerBotCountCooldownUntilMs.TryGetValue(player.PlayerId, out long playerCooldownUntil)
+            && TryGetCooldownRemainingSeconds(playerCooldownUntil, now, out int playerRemaining))
+        {
+            response = WarmupLocalization.T(
+                $"You can change bot count again in {playerRemaining}s.",
+                $"你还需要 {playerRemaining} 秒后才能再次修改机器人数量。");
+            return false;
+        }
+
+        Config.BotCount = botCount;
+        EnsureBotPopulation(_warmupGeneration);
+        TrimExcessBots();
+        SaveConfig();
+
+        _playerBotCountGlobalCooldownUntilMs = now + Math.Max(0, Config.PlayerBotCountGlobalCooldownSeconds) * 1000L;
+        _playerBotCountCooldownUntilMs[player.PlayerId] = now + BuildCooldownMs(
+            Config.PlayerBotCountCooldownSeconds,
+            Config.PlayerBotCountCooldownJitterSeconds);
+
+        response = WarmupLocalization.T(
+            $"Bot count set to {Config.BotCount}.",
+            $"机器人数量已设置为 {Config.BotCount}。");
+        return true;
+    }
+
+    public bool TryOpenLimitedRemoteAdmin(Player player, out string response)
+    {
+        if (!TryUseLimitedRemoteAdminWindow(player, out response))
+        {
+            return false;
+        }
+
+        try
+        {
+            if (!TryOpenRemoteAdminPanel(player, out string failureReason))
+            {
+                response = WarmupLocalization.T(
+                    $"Failed to open limited Remote Admin: {failureReason}",
+                    $"打开受限 Remote Admin 失败：{failureReason}");
+                return false;
+            }
+
+            player.SendHint(WarmupLocalization.T(
+                "Limited RA enabled for 20s: forcerole, bring, goto, give only.",
+                "受限 RA 已开启 20 秒：仅允许 forcerole、bring、goto、give。"), 5f);
+            response = WarmupLocalization.T(
+                "Limited Remote Admin opened for 20 seconds.",
+                "受限 Remote Admin 已开启 20 秒。");
+            return true;
+        }
+        catch (Exception exception)
+        {
+            response = WarmupLocalization.T(
+                $"Failed to open limited Remote Admin: {exception.Message}",
+                $"打开受限 Remote Admin 失败：{exception.Message}");
+            return false;
+        }
+    }
+
+    private static bool TryOpenRemoteAdminPanel(Player player, out string failureReason)
+    {
+        if (OpenRemoteAdminMethod == null)
+        {
+            failureReason = "OpenRemoteAdmin method was not found.";
+            return false;
+        }
+
+        try
+        {
+            OpenRemoteAdminMethod.Invoke(player.ReferenceHub.serverRoles, null);
+            failureReason = string.Empty;
+            return true;
+        }
+        catch (TargetInvocationException exception)
+        {
+            failureReason = exception.InnerException?.Message ?? exception.Message;
+            return false;
+        }
+        catch (Exception exception)
+        {
+            failureReason = exception.Message;
+            return false;
+        }
+    }
+
+    private bool TryUseLimitedRemoteAdminWindow(Player player, out string response)
+    {
+        if (!Config.LimitedRemoteAdminEnabled)
+        {
+            response = WarmupLocalization.T(
+                "Limited Remote Admin is disabled.",
+                "受限 Remote Admin 已禁用。");
+            return false;
+        }
+
+        long now = NowMs();
+        if (_limitedRemoteAdminWindowUntilMs.TryGetValue(player.PlayerId, out long windowUntil)
+            && windowUntil > now)
+        {
+            response = WarmupLocalization.T(
+                $"Limited RA window active for {Math.Max(1, (int)Math.Ceiling((windowUntil - now) / 1000.0))}s.",
+                $"受限 RA 窗口还剩 {Math.Max(1, (int)Math.Ceiling((windowUntil - now) / 1000.0))} 秒。");
+            return true;
+        }
+
+        if (TryGetCooldownRemainingSeconds(_limitedRemoteAdminGlobalCooldownUntilMs, now, out int globalRemaining))
+        {
+            response = WarmupLocalization.T(
+                $"Limited RA is on global cooldown for {globalRemaining}s.",
+                $"受限 RA 全局冷却中，还剩 {globalRemaining} 秒。");
+            return false;
+        }
+
+        if (_limitedRemoteAdminCooldownUntilMs.TryGetValue(player.PlayerId, out long playerCooldownUntil)
+            && TryGetCooldownRemainingSeconds(playerCooldownUntil, now, out int playerRemaining))
+        {
+            response = WarmupLocalization.T(
+                $"You can use limited RA again in {playerRemaining}s.",
+                $"你还需要 {playerRemaining} 秒后才能再次使用受限 RA。");
+            return false;
+        }
+
+        long newWindowUntil = now + Math.Max(1, Config.LimitedRemoteAdminUseWindowSeconds) * 1000L;
+        _limitedRemoteAdminWindowUntilMs[player.PlayerId] = newWindowUntil;
+        ScheduleLimitedRemoteAdminCooldown(player.PlayerId, newWindowUntil);
+        response = WarmupLocalization.T(
+            "Limited RA window started.",
+            "受限 RA 窗口已开始。");
+        return true;
+    }
+
+    private void ScheduleLimitedRemoteAdminCooldown(int playerId, long windowUntilMs)
+    {
+        int delayMs = (int)Math.Min(int.MaxValue, Math.Max(1000L, windowUntilMs - NowMs()));
+        Schedule(() =>
+        {
+            if (!_limitedRemoteAdminWindowUntilMs.TryGetValue(playerId, out long currentWindowUntil)
+                || currentWindowUntil != windowUntilMs)
+            {
+                return;
+            }
+
+            long now = NowMs();
+            _limitedRemoteAdminWindowUntilMs.Remove(playerId);
+            CloseRemoteAdminPanel(playerId);
+            _limitedRemoteAdminGlobalCooldownUntilMs = now + Math.Max(0, Config.LimitedRemoteAdminGlobalCooldownSeconds) * 1000L;
+            double cooldownScale = Math.Max(1, Config.LimitedRemoteAdminUseWindowSeconds) / 20.0;
+            int scaledCooldownSeconds = (int)Math.Ceiling(Math.Max(0, Config.LimitedRemoteAdminCooldownSeconds) * cooldownScale);
+            int scaledJitterSeconds = (int)Math.Ceiling(Math.Max(0, Config.LimitedRemoteAdminCooldownJitterSeconds) * cooldownScale);
+            _limitedRemoteAdminCooldownUntilMs[playerId] = now + BuildCooldownMs(
+                scaledCooldownSeconds,
+                scaledJitterSeconds);
+        }, delayMs);
+    }
+
+    private static void CloseRemoteAdminPanel(int playerId)
+    {
+        if (!Player.TryGet(playerId, out Player player)
+            || player.IsDestroyed)
+        {
+            return;
+        }
+
+        try
+        {
+            ServerRoles serverRoles = player.ReferenceHub.serverRoles;
+            RemoteAdminFlagField?.SetValue(serverRoles, false);
+            TargetSetRemoteAdminMethod?.Invoke(serverRoles, new object[] { false });
+        }
+        catch (Exception exception)
+        {
+            ApiLogger.Warn($"[WarmupSandbox] Failed to close limited Remote Admin for {player.Nickname}: {exception.Message}");
+        }
+    }
+
+    private long BuildCooldownMs(int seconds, int jitterSeconds)
+    {
+        int jitter = jitterSeconds <= 0 ? 0 : _random.Next(0, jitterSeconds + 1);
+        return (long)Math.Max(0, seconds + jitter) * 1000L;
+    }
+
+    private static bool TryGetCooldownRemainingSeconds(long cooldownUntilMs, long nowMs, out int remainingSeconds)
+    {
+        long remainingMs = cooldownUntilMs - nowMs;
+        if (remainingMs <= 0)
+        {
+            remainingSeconds = 0;
+            return false;
+        }
+
+        remainingSeconds = Math.Max(1, (int)Math.Ceiling(remainingMs / 1000.0));
+        return true;
+    }
+
+    private static long NowMs()
+    {
+        return DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    }
+
     public bool UpdateSetting(string key, string value, out string response)
     {
         if (string.IsNullOrWhiteSpace(key))
@@ -3258,10 +3717,30 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                     return false;
                 }
 
+                if (botCount > Config.MaxBotCount)
+                {
+                    response = $"Bot count cannot exceed {Config.MaxBotCount}.";
+                    return false;
+                }
+
                 Config.BotCount = botCount;
                 EnsureBotPopulation(_warmupGeneration);
                 TrimExcessBots();
                 response = $"Bot count set to {Config.BotCount}.";
+                return true;
+
+            case "maxbots":
+            case "maxbotcount":
+                if (!int.TryParse(value, out int maxBotCount) || maxBotCount < 0)
+                {
+                    response = "Max bot count must be a non-negative integer.";
+                    return false;
+                }
+
+                Config.MaxBotCount = maxBotCount;
+                ClampConfiguredBotCount();
+                TrimExcessBots();
+                response = $"Max bot count set to {Config.MaxBotCount}. Current bot count is {Config.BotCount}.";
                 return true;
 
             case "humanrespawn":
@@ -4033,5 +4512,65 @@ internal sealed class AutoCleanupCommandSender : ICommandSender
 
     public void Respond(string message, bool success)
     {
+    }
+}
+
+internal sealed class LimitedRemoteAdminCommandSender : RemoteAdmin.PlayerCommandSender
+{
+    private const ulong WarmupPermissions =
+        (ulong)PlayerPermissions.ForceclassSelf
+        | (ulong)PlayerPermissions.ForceclassToSpectator
+        | (ulong)PlayerPermissions.ForceclassWithoutRestrictions
+        | (ulong)PlayerPermissions.GivingItems
+        | (ulong)PlayerPermissions.PlayersManagement;
+
+    private readonly RemoteAdmin.PlayerCommandSender _inner;
+
+    public LimitedRemoteAdminCommandSender(RemoteAdmin.PlayerCommandSender inner)
+        : base(inner.ReferenceHub)
+    {
+        _inner = inner;
+    }
+
+    public override string SenderId => _inner.SenderId;
+
+    public override string Nickname => _inner.Nickname;
+
+    public override ulong Permissions => WarmupPermissions;
+
+    public override byte KickPower => 0;
+
+    public override bool FullPermissions => false;
+
+    public override string LogName => $"Warmup limited RA/{_inner.LogName}";
+
+    public override bool Available()
+    {
+        return _inner.Available();
+    }
+
+    public override void Print(string text)
+    {
+        _inner.Print(text);
+    }
+
+    public override void Print(string text, ConsoleColor color)
+    {
+        _inner.Print(text, color);
+    }
+
+    public override void Print(string text, ConsoleColor consoleColor, Color unityColor)
+    {
+        _inner.Print(text, consoleColor, unityColor);
+    }
+
+    public override void RaReply(string text, bool success, bool logToConsole, string overrideDisplay)
+    {
+        _inner.RaReply(text, success, logToConsole, overrideDisplay);
+    }
+
+    public override void Respond(string message, bool success)
+    {
+        _inner.Respond(message, success);
     }
 }

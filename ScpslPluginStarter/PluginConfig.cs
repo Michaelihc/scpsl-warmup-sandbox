@@ -39,7 +39,31 @@ public sealed class PluginConfig
 
     public int AutoCleanupIntervalSeconds { get; set; } = 180;
 
+    public int PlayerBotCountGlobalCooldownSeconds { get; set; } = 60;
+
+    public int PlayerBotCountCooldownSeconds { get; set; } = 180;
+
+    public int PlayerBotCountCooldownJitterSeconds { get; set; } = 60;
+
+    public bool LimitedRemoteAdminEnabled { get; set; } = true;
+
+    public int LimitedRemoteAdminUseWindowSeconds { get; set; } = 20;
+
+    public int LimitedRemoteAdminGlobalCooldownSeconds { get; set; } = 60;
+
+    public int LimitedRemoteAdminCooldownSeconds { get; set; } = 180;
+
+    public int LimitedRemoteAdminCooldownJitterSeconds { get; set; } = 60;
+
     public int BotCount { get; set; } = 6;
+
+    public int MaxBotCount { get; set; } = 30;
+
+    public bool ResetBotCountWhenNoActivePlayers { get; set; } = true;
+
+    public int NoActivePlayersBotCount { get; set; } = 5;
+
+    public int NoActivePlayersBotResetDelayMs { get; set; } = 3000;
 
     public string BotNamePrefix { get; set; } = "WarmupBot";
 

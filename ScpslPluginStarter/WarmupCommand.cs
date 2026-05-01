@@ -7,6 +7,7 @@ namespace ScpslPluginStarter;
 
 [CommandHandler(typeof(RemoteAdminCommandHandler))]
 [CommandHandler(typeof(GameConsoleCommandHandler))]
+[CommandHandler(typeof(ClientCommandHandler))]
 public sealed class WarmupCommand : ICommand
 {
     public string Command => "bots";
@@ -33,6 +34,18 @@ public sealed class WarmupCommand : ICommand
         }
 
         string subcommand = GetArgument(arguments, 0).ToLowerInvariant();
+        bool isPlayerSender = Player.TryGet(sender, out Player player);
+        bool isPrivilegedSender = IsPrivilegedSender(sender);
+        if (isPlayerSender
+            && !isPrivilegedSender
+            && subcommand != "status"
+            && subcommand != "setcount"
+            && subcommand != "set")
+        {
+            response = BuildPlayerHelp();
+            return false;
+        }
+
         switch (subcommand)
         {
             case "status":
@@ -61,6 +74,11 @@ public sealed class WarmupCommand : ICommand
                         "Usage: bots setcount <count>",
                         "用法：bots setcount <数量>");
                     return false;
+                }
+
+                if (isPlayerSender && !isPrivilegedSender)
+                {
+                    return plugin.TryPlayerSetBotCount(player, GetArgument(arguments, 1), out response);
                 }
 
                 return UpdateSettingAndSave(plugin, "bots", GetArgument(arguments, 1), out response);
@@ -175,7 +193,18 @@ public sealed class WarmupCommand : ICommand
             case "set":
                 if (arguments.Count == 2 && int.TryParse(GetArgument(arguments, 1), out _))
                 {
+                    if (isPlayerSender && !isPrivilegedSender)
+                    {
+                        return plugin.TryPlayerSetBotCount(player, GetArgument(arguments, 1), out response);
+                    }
+
                     return UpdateSettingAndSave(plugin, "bots", GetArgument(arguments, 1), out response);
+                }
+
+                if (isPlayerSender && !isPrivilegedSender)
+                {
+                    response = BuildPlayerHelp();
+                    return false;
                 }
 
                 if (arguments.Count < 3)
@@ -189,7 +218,7 @@ public sealed class WarmupCommand : ICommand
                 return UpdateSettingAndSave(plugin, GetArgument(arguments, 1), GetArgument(arguments, 2), out response);
 
             default:
-                response = BuildHelp();
+                response = isPlayerSender && !isPrivilegedSender ? BuildPlayerHelp() : BuildHelp();
                 return false;
         }
     }
@@ -296,5 +325,18 @@ public sealed class WarmupCommand : ICommand
         return WarmupLocalization.T(
             "bots status | start | restart | roundrestart | stop | save | set <count> | setcount <count> | set939speed <speed> | set3114speed <speed> | set049speed <speed> | set106speed <speed> | setspeed <speed> | setretreatspeed <scale> | map <bomb|standard|true|false> | difficulty <easy|normal|hard|hardest> | aimode <classic|realistic> | language <en|cn> | set retreatspeed <scale> | set <key> <value>",
             "bots status | start | restart | roundrestart | stop | save | set <数量> | setcount <数量> | set939speed <速度> | set3114speed <速度> | set049speed <速度> | set106speed <速度> | setspeed <速度> | setretreatspeed <倍率> | map <bomb|standard|true|false> | difficulty <easy|normal|hard|hardest> | aimode <classic|realistic> | language <en|cn> | set retreatspeed <倍率> | set <键> <值>");
+    }
+
+    private static string BuildPlayerHelp()
+    {
+        return WarmupLocalization.T(
+            ".bots setcount <count> changes bot count with cooldown. Use .help for all warmup commands.",
+            ".bots setcount <数量> 可带冷却修改机器人数量。输入 .help 查看全部热身命令。");
+    }
+
+    private static bool IsPrivilegedSender(ICommandSender sender)
+    {
+        return sender is CommandSender commandSender
+            && (commandSender.FullPermissions || commandSender.Permissions != 0UL);
     }
 }

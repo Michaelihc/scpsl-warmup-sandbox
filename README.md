@@ -14,8 +14,11 @@ The plugin is built for a local SCP:SL Dedicated Server install and copies itsel
 
 - Auto-start warmup on round start, first player, or waiting-for-players depending on config.
 - Spawn and maintain configurable dummy bot counts.
+- Optionally reset the runtime bot count when no real players remain online.
 - Runtime bot commands for count, difficulty, AI mode, map mode, SCP speeds, and close-retreat speed.
-- Human loadout selection with `loadout`, `ld`, or `kit`.
+- Human loadout selection with `loadout`, `ld`, or `kit`, plus temporary in-place SCP practice roles.
+- Player-facing `.help`, `.bots setcount <count>`, and `.ra` commands with cooldowns.
+- Limited player Remote Admin windows for `forcerole`, `bring`, `goto`, and `give` only.
 - Role-default gear or fully custom loadouts with reserve ammo maintenance.
 - Default fallback ammo reserve for role-default firearms, including 9x19 weapons.
 - Native SCP:SL round spawn protection support.
@@ -71,6 +74,24 @@ Use a non-default config port:
 
 ```bat
 scripts\host-warmup-server.bat --port 7778
+```
+
+Configure the recommended Chinese public-test server name and 50-player cap:
+
+```bat
+scripts\host-warmup-server.bat --configure-cn-public --start
+```
+
+For the public server description, use the plain-language Chinese template in:
+
+```text
+docs\server-description.zh-CN.txt
+```
+
+Publish that text to Pastebin, then set the ID in SCP:SL's native `serverinfo_pastebin_id` field or pass it to the helper:
+
+```bat
+scripts\host-warmup-server.bat --configure-cn-public --server-info-id pastebin_id --start
 ```
 
 The script does not overwrite an existing live config.
@@ -160,6 +181,7 @@ Help:
 ```text
 bots
 modhelp
+.help
 ```
 
 Human loadouts:
@@ -167,6 +189,7 @@ Human loadouts:
 ```text
 loadout
 loadout <number|preset|role>
+loadout <173|939|106|049|3114|096>
 ```
 
 Aliases:
@@ -175,6 +198,23 @@ Aliases:
 ld
 kit
 ```
+
+Player-facing commands:
+
+```text
+.help
+.loadout
+.loadout <number|name>
+.loadout <173|939|106|049|3114|096>
+.bots setcount <count>
+.ra
+```
+
+Temporary SCP loadouts switch you in-place, clear inventory/ammo, and do not become your respawn loadout. After death, you return to your last selected human loadout.
+
+`.bots setcount <count>` is available to players with cooldowns: a 60 second global cooldown and a per-player cooldown of 3 minutes plus 0-60 random seconds by default.
+
+`.ra` opens a short limited Remote Admin window. Non-admin players can only use `forcerole`, `bring`, `goto`, and `give`; other RA commands are blocked. The default window is 20 seconds, followed by a global cooldown and a per-player cooldown. If the RA window duration is changed, the per-player cooldown scales from the configured 20 second baseline.
 
 ## Configuration
 
@@ -188,6 +228,10 @@ Important top-level fields:
 
 - `language`
 - `bot_count`
+- `max_bot_count`
+- `reset_bot_count_when_no_active_players`
+- `no_active_players_bot_count`
+- `no_active_players_bot_reset_delay_ms`
 - `difficulty_preset`
 - `human_role`
 - `bot_role`
@@ -195,6 +239,14 @@ Important top-level fields:
 - `enable_spawn_protection`
 - `auto_cleanup_enabled`
 - `auto_cleanup_interval_seconds`
+- `player_bot_count_global_cooldown_seconds`
+- `player_bot_count_cooldown_seconds`
+- `player_bot_count_cooldown_jitter_seconds`
+- `limited_remote_admin_enabled`
+- `limited_remote_admin_use_window_seconds`
+- `limited_remote_admin_global_cooldown_seconds`
+- `limited_remote_admin_cooldown_seconds`
+- `limited_remote_admin_cooldown_jitter_seconds`
 - `dust2_map`
 - `bot_behavior`
 
