@@ -96,6 +96,26 @@ scripts\host-warmup-server.bat --configure-cn-public --server-info-id pastebin_i
 
 The script does not overwrite an existing live config.
 
+## Monitor Player Count
+
+Poll the public server through the Steam query protocol:
+
+```bat
+scripts\watch-player-count.bat
+```
+
+Run one query and exit:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\watch-player-count.ps1 -Once
+```
+
+Override the address or polling interval:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\watch-player-count.ps1 -HostName 60.205.222.32 -Port 7777 -IntervalSeconds 5
+```
+
 ## Manual Build
 
 ```powershell

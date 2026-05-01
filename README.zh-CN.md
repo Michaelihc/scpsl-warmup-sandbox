@@ -147,6 +147,26 @@ no_active_players_bot_reset_delay_ms: 3000
 
 `max_bot_count` 会限制命令和配置里的机器人数量，避免玩家把机器人刷得太多。空服重置只改运行时机器人数量，不会把玩家用 `.bots setcount` 改过的数值写回配置文件。下一次有人进服后仍可重新用命令调整。
 
+## 查看在线人数
+
+通过 Steam 查询协议轮询服务器人数：
+
+```bat
+scripts\watch-player-count.bat
+```
+
+只查询一次并退出：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\watch-player-count.ps1 -Once
+```
+
+修改地址或刷新间隔：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\watch-player-count.ps1 -HostName 60.205.222.32 -Port 7777 -IntervalSeconds 5
+```
+
 ## 手动构建
 
 ```powershell
