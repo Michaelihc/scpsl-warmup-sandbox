@@ -70,12 +70,15 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             null);
     private static readonly FieldInfo? RemoteAdminFlagField = typeof(ServerRoles)
         .GetField("RemoteAdmin", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+    private static readonly FieldInfo? PermissionsField = typeof(ServerRoles)
+        .GetField("Permissions", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
     private readonly Dictionary<int, ManagedBotState> _managedBots = new();
     private readonly Dictionary<int, string> _selectedHumanLoadouts = new();
     private readonly Dictionary<int, long> _playerBotCountCooldownUntilMs = new();
     private readonly Dictionary<int, long> _limitedRemoteAdminCooldownUntilMs = new();
     private readonly Dictionary<int, long> _limitedRemoteAdminWindowUntilMs = new();
+    private readonly Dictionary<int, LimitedRemoteAdminState> _limitedRemoteAdminOriginalState = new();
     private readonly System.Random _random = new();
     private readonly HumanPresetService _humanPresetService = new();
     private readonly BotCombatService _botCombatService = new();
@@ -211,8 +214,13 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         if (ev.CommandType != CommandType.RemoteAdmin
             || ev.Sender == null
             || ev.Command == null
-            || !Player.TryGet(ev.Sender, out Player player)
-            || IsPrivilegedCommandSender(ev.Sender))
+            || !Player.TryGet(ev.Sender, out Player player))
+        {
+            return;
+        }
+
+        bool isLimitedWindow = IsLimitedRemoteAdminWindowActive(player.PlayerId);
+        if (!isLimitedWindow && (IsPrivilegedCommandSender(ev.Sender) || HasNativeRemoteAdminAccess(player)))
         {
             return;
         }
@@ -403,6 +411,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         _playerBotCountCooldownUntilMs.Remove(ev.Player.PlayerId);
         _limitedRemoteAdminCooldownUntilMs.Remove(ev.Player.PlayerId);
         _limitedRemoteAdminWindowUntilMs.Remove(ev.Player.PlayerId);
+        _limitedRemoteAdminOriginalState.Remove(ev.Player.PlayerId);
 
         if (RemoveManagedBot(ev.Player.PlayerId))
         {
@@ -3526,6 +3535,22 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     public bool TryOpenLimitedRemoteAdmin(Player player, out string response)
     {
+        if (!IsLimitedRemoteAdminWindowActive(player.PlayerId) && HasNativeRemoteAdminAccess(player))
+        {
+            if (!TryOpenRemoteAdminPanel(player, out string failureReason))
+            {
+                response = WarmupLocalization.T(
+                    $"Failed to open Remote Admin: {failureReason}",
+                    $"打开 Remote Admin 失败：{failureReason}");
+                return false;
+            }
+
+            response = WarmupLocalization.T(
+                "Remote Admin opened with your normal admin permissions.",
+                "已使用你的正常管理员权限打开 Remote Admin。");
+            return true;
+        }
+
         if (!TryUseLimitedRemoteAdminWindow(player, out response))
         {
             return false;
@@ -3533,8 +3558,19 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
         try
         {
+            if (!TryActivateLimitedRemoteAdminUi(player, out string activationFailure))
+            {
+                _limitedRemoteAdminWindowUntilMs.Remove(player.PlayerId);
+                response = WarmupLocalization.T(
+                    $"Failed to prepare limited Remote Admin: {activationFailure}",
+                    $"准备受限 Remote Admin 失败：{activationFailure}");
+                return false;
+            }
+
             if (!TryOpenRemoteAdminPanel(player, out string failureReason))
             {
+                _limitedRemoteAdminWindowUntilMs.Remove(player.PlayerId);
+                RestoreLimitedRemoteAdminUi(player.PlayerId);
                 response = WarmupLocalization.T(
                     $"Failed to open limited Remote Admin: {failureReason}",
                     $"打开受限 Remote Admin 失败：{failureReason}");
@@ -3551,6 +3587,8 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
         catch (Exception exception)
         {
+            _limitedRemoteAdminWindowUntilMs.Remove(player.PlayerId);
+            RestoreLimitedRemoteAdminUi(player.PlayerId);
             response = WarmupLocalization.T(
                 $"Failed to open limited Remote Admin: {exception.Message}",
                 $"打开受限 Remote Admin 失败：{exception.Message}");
@@ -3580,6 +3618,78 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         catch (Exception exception)
         {
             failureReason = exception.Message;
+            return false;
+        }
+    }
+
+    private bool TryActivateLimitedRemoteAdminUi(Player player, out string failureReason)
+    {
+        if (PermissionsField == null)
+        {
+            failureReason = "ServerRoles.Permissions field was not found.";
+            return false;
+        }
+
+        try
+        {
+            ServerRoles serverRoles = player.ReferenceHub.serverRoles;
+            if (!_limitedRemoteAdminOriginalState.ContainsKey(player.PlayerId))
+            {
+                _limitedRemoteAdminOriginalState[player.PlayerId] = new LimitedRemoteAdminState(
+                    GetServerRolePermissions(serverRoles),
+                    GetRemoteAdminFlag(serverRoles));
+            }
+
+            PermissionsField.SetValue(serverRoles, LimitedRemoteAdminCommandSender.WarmupPermissions);
+            RemoteAdminFlagField?.SetValue(serverRoles, true);
+            failureReason = string.Empty;
+            return true;
+        }
+        catch (Exception exception)
+        {
+            failureReason = exception.Message;
+            return false;
+        }
+    }
+
+    private bool IsLimitedRemoteAdminWindowActive(int playerId)
+    {
+        long now = NowMs();
+        return _limitedRemoteAdminWindowUntilMs.TryGetValue(playerId, out long windowUntil)
+            && windowUntil > now;
+    }
+
+    private static bool HasNativeRemoteAdminAccess(Player player)
+    {
+        ServerRoles serverRoles = player.ReferenceHub.serverRoles;
+        if (GetServerRolePermissions(serverRoles) != 0UL)
+        {
+            return true;
+        }
+
+        return serverRoles.Group?.Permissions != 0UL;
+    }
+
+    private static ulong GetServerRolePermissions(ServerRoles serverRoles)
+    {
+        try
+        {
+            return PermissionsField?.GetValue(serverRoles) is ulong permissions ? permissions : 0UL;
+        }
+        catch
+        {
+            return 0UL;
+        }
+    }
+
+    private static bool GetRemoteAdminFlag(ServerRoles serverRoles)
+    {
+        try
+        {
+            return RemoteAdminFlagField?.GetValue(serverRoles) is bool remoteAdmin && remoteAdmin;
+        }
+        catch
+        {
             return false;
         }
     }
@@ -3654,23 +3764,53 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }, delayMs);
     }
 
-    private static void CloseRemoteAdminPanel(int playerId)
+    private void CloseRemoteAdminPanel(int playerId)
     {
         if (!Player.TryGet(playerId, out Player player)
             || player.IsDestroyed)
         {
+            _limitedRemoteAdminOriginalState.Remove(playerId);
             return;
         }
 
         try
         {
             ServerRoles serverRoles = player.ReferenceHub.serverRoles;
-            RemoteAdminFlagField?.SetValue(serverRoles, false);
+            RestoreLimitedRemoteAdminUi(playerId);
             TargetSetRemoteAdminMethod?.Invoke(serverRoles, new object[] { false });
         }
         catch (Exception exception)
         {
             ApiLogger.Warn($"[WarmupSandbox] Failed to close limited Remote Admin for {player.Nickname}: {exception.Message}");
+        }
+    }
+
+    private void RestoreLimitedRemoteAdminUi(int playerId)
+    {
+        if (!Player.TryGet(playerId, out Player player)
+            || player.IsDestroyed)
+        {
+            _limitedRemoteAdminOriginalState.Remove(playerId);
+            return;
+        }
+
+        try
+        {
+            ServerRoles serverRoles = player.ReferenceHub.serverRoles;
+            if (_limitedRemoteAdminOriginalState.TryGetValue(playerId, out LimitedRemoteAdminState state))
+            {
+                PermissionsField?.SetValue(serverRoles, state.Permissions);
+                RemoteAdminFlagField?.SetValue(serverRoles, state.RemoteAdmin);
+            }
+            else
+            {
+                PermissionsField?.SetValue(serverRoles, 0UL);
+                RemoteAdminFlagField?.SetValue(serverRoles, false);
+            }
+        }
+        finally
+        {
+            _limitedRemoteAdminOriginalState.Remove(playerId);
         }
     }
 
@@ -4515,9 +4655,22 @@ internal sealed class AutoCleanupCommandSender : ICommandSender
     }
 }
 
+internal readonly struct LimitedRemoteAdminState
+{
+    public LimitedRemoteAdminState(ulong permissions, bool remoteAdmin)
+    {
+        Permissions = permissions;
+        RemoteAdmin = remoteAdmin;
+    }
+
+    public ulong Permissions { get; }
+
+    public bool RemoteAdmin { get; }
+}
+
 internal sealed class LimitedRemoteAdminCommandSender : RemoteAdmin.PlayerCommandSender
 {
-    private const ulong WarmupPermissions =
+    internal const ulong WarmupPermissions =
         (ulong)PlayerPermissions.ForceclassSelf
         | (ulong)PlayerPermissions.ForceclassToSpectator
         | (ulong)PlayerPermissions.ForceclassWithoutRestrictions
