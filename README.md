@@ -2,6 +2,8 @@
 
 [中文说明](README.zh-CN.md)
 
+> **Development warning:** This plugin is still in active development. Expect rough edges, behavior changes, and occasional bot/pathing issues. Test on a private server before using it with players.
+
 `ScpslPluginStarter` is a LabAPI plugin for hosting an SCP:SL warmup sandbox with managed dummy bots, configurable human loadouts, optional Dust2 arena support, bomb mode, runtime bot tuning commands, and localized help text.
 
 The plugin is built for a local SCP:SL Dedicated Server install and copies itself into the LabAPI global plugin folder after a successful build.

@@ -2,6 +2,8 @@
 
 [English README](README.md)
 
+> **开发警告：** 这个插件仍在积极开发中。可能会有粗糙之处、行为变化，以及偶发的机器人或寻路问题。请先在私人服务器测试，再给玩家使用。
+
 `ScpslPluginStarter` 是一个 LabAPI 插件，用来在 SCP:SL 服务器里运行热身沙盒。它可以管理假人机器人、玩家出生预设、可选 Dust2 场地、爆破模式、运行时调参命令，以及中英文帮助文本。
 
 ## 功能
@@ -288,4 +290,3 @@ bots map standard
 - `[BotNav:...]`
 - `[AttachmentDebug]`
 - `[WarmupSandbox]`
-
