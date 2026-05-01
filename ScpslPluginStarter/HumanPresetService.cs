@@ -21,7 +21,7 @@ internal sealed class HumanPresetService
             new NamedLoadoutDefinition
             {
                 Name = "Default",
-                Description = "Fallback human preset.",
+                Description = WarmupLocalization.T("Fallback human preset.", "备用人类预设。"),
                 Role = config.HumanRole,
                 UseRoleDefaultLoadout = false,
                 Loadout = config.HumanLoadout,
@@ -83,18 +83,20 @@ internal sealed class HumanPresetService
         NamedLoadoutDefinition[] presets = GetPresets(config);
         List<string> lines = new()
         {
-            $"Presets (selected: {selectedName})",
+            WarmupLocalization.T($"Presets (selected: {selectedName})", $"预设（当前：{selectedName}）"),
         };
 
         for (int i = 0; i < presets.Length; i++)
         {
             NamedLoadoutDefinition preset = presets[i];
             string marker = string.Equals(selectedName, preset.Name, StringComparison.OrdinalIgnoreCase) ? "*" : "-";
-            string gearLabel = preset.UseRoleDefaultLoadout ? "default gear" : "custom gear";
+            string gearLabel = preset.UseRoleDefaultLoadout
+                ? WarmupLocalization.T("default gear", "默认装备")
+                : WarmupLocalization.T("custom gear", "自定义装备");
             lines.Add($"{marker} {i + 1}. {preset.Name} [{preset.Role}] - {gearLabel} - {preset.Description}");
         }
 
-        lines.Add("Use `loadout <number|name>` to apply.");
+        lines.Add(WarmupLocalization.T("Use `loadout <number|name>` to apply.", "使用 `loadout <编号|名称>` 应用。"));
         return string.Join("\n", lines);
     }
 }

@@ -13,20 +13,22 @@ public sealed class LoadoutCommand : ICommand
 
     public string[] Aliases => new[] { "ld", "kit" };
 
-    public string Description => "Shows and selects your warmup human spawn preset.";
+    public string Description => WarmupLocalization.T(
+        "Shows and selects your warmup human spawn preset.",
+        "显示并选择你的热身人类出生预设。");
 
     public bool Execute(ArraySegment<string> arguments, ICommandSender sender, out string response)
     {
         WarmupSandboxPlugin? plugin = WarmupSandboxPlugin.Instance;
         if (plugin == null)
         {
-            response = "WarmupSandbox is not loaded.";
+            response = WarmupLocalization.T("WarmupSandbox is not loaded.", "WarmupSandbox 未加载。");
             return false;
         }
 
         if (!Player.TryGet(sender, out Player player))
         {
-            response = "Only players can use this command.";
+            response = WarmupLocalization.T("Only players can use this command.", "只有玩家可以使用此命令。");
             return false;
         }
 

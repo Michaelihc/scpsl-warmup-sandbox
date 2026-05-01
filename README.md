@@ -1,249 +1,328 @@
 # SCP:SL Warmup Sandbox
 
-`ScpslPluginStarter` is a LabAPI plugin for running a gunplay warmup sandbox in SCP:SL. It manages a warmup lifecycle, respawns human players into selectable presets, spawns dummy bots, and drives those bots through dummy actions for movement, aiming, firing, reloading, and target selection.
+`ScpslPluginStarter` is a LabAPI plugin for hosting an SCP:SL warmup sandbox with managed dummy bots, configurable human loadouts, optional Dust2 arena support, bomb mode, runtime bot tuning commands, and localized help text.
 
-## What The Plugin Does
+The plugin is built for a local SCP:SL Dedicated Server install and copies itself into the LabAPI global plugin folder after a successful build.
 
-- Keeps a warmup session running without normal round-end pressure when configured to do so.
-- Respawns live human players into configurable spawn presets through the `loadout` command.
-- Spawns and maintains a configurable number of dummy bots.
-- Lets bot difficulty and bot AI mode be changed independently.
-- Supports a `Realistic` AI overlay for faction-aware target selection, LOS-only firing, target memory, reacquire delay, aim settling, and post-reload head lock.
-- Caches each managed bot's last non-spectator role so manual in-game role changes can persist across that bot's future respawns.
-- Refills and manages bot/human loadouts, reserve ammo, and bot weapon equip fallback.
+## Features
 
-## Repository Layout
+- Auto-start warmup on round start, first player, or waiting-for-players depending on config.
+- Spawn and maintain configurable dummy bot counts.
+- Runtime bot commands for count, difficulty, AI mode, map mode, SCP speeds, and close-retreat speed.
+- Human loadout selection with `loadout`, `ld`, or `kit`.
+- Role-default gear or fully custom loadouts with reserve ammo maintenance.
+- Default fallback ammo reserve for role-default firearms, including 9x19 weapons.
+- Native SCP:SL round spawn protection support.
+- Optional Dust2 schematic arena with ProjectMER.
+- Optional bomb mode with plant/defuse flow.
+- Optional surface-zone runtime NavMesh while leaving the randomized facility alone.
+- English and Chinese command/help strings through `bots language <en|cn>`.
 
-- `ScpslPluginStarter/ScpslPluginStarter.csproj`
-  The .NET Framework 4.8 project. It references SCP:SL server assemblies from the local dedicated-server install and copies the built DLL into the LabAPI global plugin folder after build.
-- `ScpslPluginStarter/WarmupSandboxPlugin.cs`
-  Main plugin entry point and orchestration layer. This is where LabAPI events are subscribed, warmup lifecycle is controlled, bots are spawned/scheduled, commands are backed, and shared helpers such as loadout application, dummy-action invocation, and debug logging live.
-- `ScpslPluginStarter/PluginConfig.cs`
-  All config types and defaults: top-level plugin config, `WarmupDifficulty`, `WarmupAiMode`, loadout definitions, preset definitions, and bot behavior tuning.
-- `ScpslPluginStarter/ManagedBotState.cs`
-  Persistent runtime state per managed bot.
-- `ScpslPluginStarter/BotEngagementState.cs`
-  Per-bot realistic-combat engagement state: current target, last seen timing, reaction gating, initial aim offsets, reload lock state, and remembered aim point.
-- `ScpslPluginStarter/HumanPresetService.cs`
-  Resolves human presets and builds the `loadout` menu text.
-- `ScpslPluginStarter/BotTargetingService.cs`
-  Target filtering, team hostility checks, LOS evaluation, closest-visible target selection, and remembered-target behavior.
-- `ScpslPluginStarter/BotAimService.cs`
-  Converts desired aim points into dummy look actions.
-- `ScpslPluginStarter/BotCombatService.cs`
-  Firearm equip fallback, realistic firing gates, and reload-lock behavior.
-- `ScpslPluginStarter/BotMovementService.cs`
-  Range-keeping, strafing, crowd avoidance, and unstuck movement.
-- `ScpslPluginStarter/WarmupCommand.cs`
-  Remote Admin `warmup` command.
-- `ScpslPluginStarter/LoadoutCommand.cs`
-  Player/client `loadout` command.
-- `ScpslPluginStarter/ModHelpCommand.cs`
-  Remote Admin `modhelp` helper.
-- `ScpslPluginStarter/config.yml`
-  Checked-in sample config showing the current shape and defaults.
-- `ScpslPluginStarter/ARCHITECTURE.md`
-  Deeper code walkthrough for maintainers.
+## Requirements
 
-## Runtime Flow
+- Windows host.
+- SCP:SL Dedicated Server installed through Steam.
+- LabAPI installed on the server.
+- .NET SDK capable of building `net48` projects.
+- ProjectMER only if you want Dust2 schematic loading.
 
-1. `WarmupSandboxPlugin.Enable()` subscribes to server/player events and reapplies the configured difficulty preset.
-2. Depending on config, the plugin can auto-start on `WaitingForPlayers`, first human join, or `RoundStarted`.
-3. `RestartWarmup()` increments the generation token, clears managed bots, and schedules `SetupWarmup()`.
-4. `SetupWarmup()` respawns all managed human players into their selected presets, then schedules bot population.
-5. `SpawnBot()` creates dummy players and tracks them in `_managedBots`.
-6. `ConfigureSpawnedBot()` applies the bot loadout, resets runtime state, and schedules the bot brain.
-7. `RunBotBrain()` performs the bot loop:
-   - select a target
-   - decide whether movement is actually expected this tick, then update stuck state
-   - move toward or around that target
-   - ensure a firearm is equipped
-   - aim
-   - reload if needed
-   - fire if allowed
-   - schedule the next think tick
+Default server path used by the project:
 
-The plugin uses a warmup generation token and per-bot brain token so stale delayed actions do not continue after restarts, respawns, or shutdown.
+```text
+C:\Program Files (x86)\Steam\steamapps\common\SCP Secret Laboratory Dedicated Server
+```
 
-## Human Presets And Loadouts
+If your server is elsewhere, update `ScpslServerManagedDir` in `ScpslPluginStarter/ScpslPluginStarter.csproj`.
 
-Human spawn presets are stored in `human_loadout_presets`. Each preset is a full spawn preset, not just a weapon kit:
+## Quick Host
 
-- `name`
-- `description`
-- `role`
-- `use_role_default_loadout`
-- optional `loadout`
+From the repository root:
 
-Preset selection rules:
+```bat
+scripts\host-warmup-server.bat
+```
 
-- `loadout <number>` selects by menu position.
-- `loadout <name>` selects by preset name.
-- `loadout <role>` also works by role enum name.
+That script:
 
-Examples:
+- builds the plugin
+- deploys the DLL through the project build target
+- copies the sample config on first run only
+- optionally starts `LocalAdmin.exe`
 
-- `loadout CiInsurgent`
-- `loadout ChaosConscript`
-- `loadout NtfCaptain`
-- `loadout AK`
+Start the server after deploy:
 
-Current default presets include:
+```bat
+scripts\host-warmup-server.bat --start
+```
 
-- `NtfPrivate`
-- `NtfSergeant`
-- `NtfCaptain`
-- `Guard`
-- `ChaosRepressor`
-- `CiInsurgent` -> `RoleTypeId.ChaosConscript`
-- `ChaosMarauder`
-- `Rifle`
-- `AK`
-- `SMG`
+Use a non-default server path:
 
-If `use_role_default_loadout` is `true`, the player respawns into the class and keeps the role’s default gear. If it is `false`, the configured custom loadout is applied.
+```bat
+scripts\host-warmup-server.bat --server "D:\Servers\SCP Secret Laboratory Dedicated Server" --start
+```
 
-## Bot Difficulty vs AI Mode
+Use a non-default config port:
 
-These are separate controls.
+```bat
+scripts\host-warmup-server.bat --port 7778
+```
 
-- `WarmupDifficulty`
-  Controls timing/range defaults such as think interval, shot interval, release delay, and preferred range.
-- `WarmupAiMode`
-  Controls bot behavior model.
+The script does not overwrite an existing live config.
 
-Current AI modes:
-
-- `Classic`
-  Legacy-style bot behavior using the same movement/shoot loop without realistic LOS/engagement logic.
-- `Realistic`
-  Human-only overlay for:
-  - built-in team hostility checks
-  - visible-target prioritization
-  - LOS-only firing
-  - sight memory
-  - reacquire delay
-  - initial inaccuracy that settles over time
-  - post-reload head-lock behavior
-
-## Commands
-
-Remote Admin:
-
-- `warmup status`
-- `warmup start`
-- `warmup restart`
-- `warmup roundrestart`
-- `warmup stop`
-- `warmup save`
-- `warmup difficulty <easy|normal|hard|hardest>`
-- `warmup aimode <classic|realistic>`
-- `warmup set <bots|humanrespawn|botrespawn|humanrole|botrole|forceroundstart|suppressroundend|keepmagfilled|aimode> <value>`
-- `modhelp`
-
-Notes:
-
-- `warmup set botrole <RoleTypeId>` updates the default role used for newly spawned bots and for bots that do not have a per-bot cached respawn role.
-- If you use the game's own role-changing commands on a managed bot, the plugin now remembers that bot's last non-spectator role and respawns that specific bot back into that role after death.
-
-Player/client:
-
-- `loadout`
-- `loadout <number|preset|role>`
-
-Aliases:
-
-- `warmup`, `ws`, `warmupsandbox`
-- `loadout`, `ld`, `kit`
-
-## Config Model
-
-Top-level config areas:
-
-- warmup lifecycle and scheduling
-- human role/preset defaults
-- bot role/loadout defaults
-- `bot_behavior`
-
-Important `bot_behavior` fields:
-
-- `ai_mode`
-- `think_interval_min_ms`
-- `think_interval_max_ms`
-- `min_shot_interval_ms`
-- `preferred_range`
-- `range_tolerance`
-- `nav_debug_logging`
-- `keep_magazine_filled`
-- `target_aim_height_offset`
-- adaptive close-range movement tuning such as:
-  - `enable_adaptive_close_range_strafing`
-  - `close_range_strafe_distance`
-  - `very_close_range_strafe_distance`
-  - `close_range_strafe_repeat_count`
-  - `very_close_range_strafe_repeat_count`
-  - `enable_adaptive_close_range_retreat`
-  - `retreat_start_distance_buffer`
-  - `close_range_retreat_repeat_count`
-  - `very_close_range_retreat_repeat_count`
-- realistic combat tuning such as:
-  - `realistic_sight_memory_ms`
-  - `realistic_reacquire_delay_ms`
-  - `realistic_initial_yaw_offset_max_degrees`
-  - `realistic_initial_pitch_offset_max_degrees`
-  - `realistic_aim_settle_ms`
-  - `realistic_reload_lock_offset_max_degrees`
-  - `realistic_head_aim_height_offset`
-  - `realistic_los_debug_logging`
-
-Use the checked-in sample at `ScpslPluginStarter/config.yml` as the reference shape.
-
-## Build And Deploy
-
-Build:
+## Manual Build
 
 ```powershell
 dotnet build .\ScpslPluginStarter\ScpslPluginStarter.csproj
 ```
 
-The project is set up to copy the built DLL into:
+After build, the project copies:
 
-- `%AppData%\SCP Secret Laboratory\LabAPI\plugins\global`
+- plugin DLL to `%AppData%\SCP Secret Laboratory\LabAPI\plugins\global`
+- Dust2 schematic files to `%AppData%\SCP Secret Laboratory\LabAPI\configs\ProjectMER\Schematics\de_dust2`
 
-That happens through the `DeployToLabApi` target in the project file after a successful build.
+Live config usually lives at:
 
-Manual plugin DLL path:
+```text
+%AppData%\SCP Secret Laboratory\LabAPI\configs\7777\WarmupSandbox\config.yml
+```
 
-- `ScpslPluginStarter\bin\Debug\net48\ScpslPluginStarter.dll`
+Copy `ScpslPluginStarter\config.yml` there if LabAPI has not generated one yet.
 
-## Debugging Notes
+## Runtime Commands
 
-The plugin has detailed bot logging when `EnableDebugLogging` is enabled.
+Commands are registered for Remote Admin and game console where supported.
 
-Common log families:
+Primary command aliases:
+
+```text
+bots
+bot
+warmup
+ws
+warmupsandbox
+```
+
+Common commands:
+
+```text
+bots status
+bots start
+bots restart
+bots roundrestart
+bots stop
+bots save
+bots set <count>
+bots setcount <count>
+bots difficulty <easy|normal|hard|hardest>
+bots aimode <classic|realistic>
+bots language <en|cn>
+bots map <bomb|standard|true|false>
+bots setretreatspeed <scale>
+bots set retreatspeed <scale>
+```
+
+SCP facility follow speeds:
+
+```text
+bots setspeed <speed>
+bots set939speed <speed>
+bots set3114speed <speed>
+bots set049speed <speed>
+bots set106speed <speed>
+```
+
+Generic setting form:
+
+```text
+bots set <key> <value>
+```
+
+Examples:
+
+```text
+bots set 2
+bots difficulty hard
+bots aimode realistic
+bots language cn
+bots setretreatspeed 0.92
+bots set939speed 7.5
+bots map bomb
+```
+
+Help:
+
+```text
+bots
+modhelp
+```
+
+Human loadouts:
+
+```text
+loadout
+loadout <number|preset|role>
+```
+
+Aliases:
+
+```text
+ld
+kit
+```
+
+## Configuration
+
+The checked-in sample config is:
+
+```text
+ScpslPluginStarter\config.yml
+```
+
+Important top-level fields:
+
+- `language`
+- `bot_count`
+- `difficulty_preset`
+- `human_role`
+- `bot_role`
+- `use_bot_role_default_loadout`
+- `enable_spawn_protection`
+- `dust2_map`
+- `bot_behavior`
+
+Important `bot_behavior` fields:
+
+- `ai_mode`
+- `preferred_range`
+- `range_tolerance`
+- `orbit_retreat_distance`
+- `close_retreat_speed_scale`
+- `enable_adaptive_close_range_retreat`
+- `facility_dummy_follow_speed`
+- `facility_dummy_follow_speed_scp939`
+- `facility_dummy_follow_speed_scp3114`
+- `facility_dummy_follow_speed_scp049`
+- `facility_dummy_follow_speed_scp106`
+- `nav_debug_logging`
+- `realistic_los_debug_logging`
+
+## Difficulty
+
+Difficulty is changed at runtime with:
+
+```text
+bots difficulty <easy|normal|hard|hardest>
+```
+
+Harder difficulty keeps the fastest brain update cadence and improves tracking accuracy more quickly. Easier difficulties mainly reduce tracking accuracy growth over time rather than slowing the entire brain loop.
+
+## Loadouts And Ammo
+
+Custom loadouts define inventory items and ammo grants:
+
+```yaml
+items:
+- GunCrossvec
+- ArmorLight
+- Medkit
+ammo:
+- type: Ammo9x19
+  amount: 240
+```
+
+If role-default gear is used, there may be no custom loadout object. The plugin now maintains reserve ammo from the equipped firearm's actual ammo type and falls back to 240 rounds when no explicit grant exists.
+
+## Dust2 And Bomb Mode
+
+Dust2 uses ProjectMER at runtime. The plugin does not compile against ProjectMER; it discovers the loader by reflection.
+
+Enable Dust2:
+
+```text
+bots map true
+```
+
+Enable bomb mode:
+
+```text
+bots map bomb
+```
+
+Return to normal facility warmup:
+
+```text
+bots map standard
+```
+
+## Repository Layout
+
+- `ScpslPluginStarter/ScpslPluginStarter.csproj`
+  Main .NET Framework 4.8 plugin project.
+- `ScpslPluginStarter/WarmupSandboxPlugin.cs`
+  Plugin entry point, LabAPI event wiring, command backing, loadouts, warmup lifecycle, and shared runtime helpers.
+- `ScpslPluginStarter/BotControllerService.cs`
+  Main bot brain orchestration, movement decisions, orbit/retreat handling, NavMesh steering, and behavior copy logic.
+- `ScpslPluginStarter/BotTargetingService.cs`
+  Target filtering, LOS checks, target scoring, and faction hostility.
+- `ScpslPluginStarter/BotAimService.cs`
+  Aim point selection and dummy look action selection.
+- `ScpslPluginStarter/BotCombatService.cs`
+  Firearm equip fallback, fire gating, reload checks, and combat helpers.
+- `ScpslPluginStarter/BotNavigationService.cs`
+  Pathing and navigation helpers.
+- `ScpslPluginStarter/BombModeService.cs`
+  Bomb round state, carrier assignment, plant/defuse interactions, and win checks.
+- `ScpslPluginStarter/Dust2MapService.cs`
+  ProjectMER schematic loading and Dust2 spawn helpers.
+- `ScpslPluginStarter/FacilityNavMeshService.cs`
+  Optional runtime NavMesh work for supported zones/templates.
+- `ScpslPluginStarter/FacilityNavAgentFollower.cs`
+  NavMeshAgent follower bridge used where runtime NavMesh steering is enabled.
+- `ScpslPluginStarter/HumanPresetService.cs`
+  Human preset lookup and loadout menu formatting.
+- `ScpslPluginStarter/WarmupCommand.cs`
+  `bots` command implementation.
+- `ScpslPluginStarter/LoadoutCommand.cs`
+  `loadout` command implementation.
+- `ScpslPluginStarter/ModHelpCommand.cs`
+  Localized help command.
+- `ScpslPluginStarter/WarmupLocalization.cs`
+  Lightweight English/Chinese localization helper.
+- `ScpslPluginStarter/Schematics/de_dust2`
+  Dust2 schematic assets copied into ProjectMER config by the build.
+- `ScpslPluginStarter/NavTemplates`
+  Exported navigation template data.
+- `tools/NavTemplateExporter`
+  Utility used to export template data from an AssetRipper Unity project.
+- `scripts/host-warmup-server.bat`
+  Build, deploy, and optional server-start helper.
+
+## Debugging
+
+Most logging is disabled by default. Turn on only the log family you need:
+
+- `enable_debug_logging`
+- `enable_verbose_bot_logging`
+- `enable_attachment_logging`
+- `enable_arena_logging`
+- `enable_zoom_logging`
+- `bot_behavior.nav_debug_logging`
+- `bot_behavior.realistic_los_debug_logging`
+
+Useful log tags:
 
 - `[BotCombat:...]`
-  Target, team relationship, LOS state, equipped item, and combat snapshot.
 - `[BotAim:...]`
-  Desired aim, applied aim, raw look state, and dummy look actions used.
-- `[BotDebug:...] shot-*`
-  Fire attempts, cooldown skips, release actions, and post-shot verification.
-- `[BotDebug:...] reload-*`
-  Reload attempts and reload events.
 - `[BotNav:...]`
-  Movement-state, movement-branch, and pathing/unstuck diagnostics such as `move-state state=chase|hold|retreat`.
+- `[AttachmentDebug]`
+- `[WarmupSandbox]`
 
-`realistic_los_debug_logging` is useful when tuning `Realistic` mode LOS behavior.
-`nav_debug_logging` is useful when tuning spacing, chase/retreat thresholds, strafing, and stuck detection.
+## Git Notes
 
-## Current Architecture Notes
+Do not commit local exported game projects or build output. `.gitignore` excludes:
 
-The plugin has been partially refactored away from a single god script, but `WarmupSandboxPlugin.cs` still contains a large amount of orchestration and shared plumbing. The focused service files are the right place for future behavior work:
+- `ExportedSCPSL/`
+- `bin/`
+- `obj/`
+- local LabAPI/server output
 
-- preset lookup/menu work belongs in `HumanPresetService`
-- target filtering/LOS logic belongs in `BotTargetingService`
-- aim-point/aim-action logic belongs in `BotAimService`
-- equip/reload/fire gating belongs in `BotCombatService`
-- movement/unstuck logic belongs in `BotMovementService`
-
-If you are extending behavior, prefer pushing logic outward into those services instead of growing `WarmupSandboxPlugin.cs` further.

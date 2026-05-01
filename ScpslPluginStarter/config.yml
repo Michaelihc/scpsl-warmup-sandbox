@@ -4,9 +4,18 @@ auto_start_on_round_started: true
 force_round_start_on_first_player: true
 suppress_round_end: true
 broadcast_warmup_status: true
+language: en
 enable_debug_logging: false
+enable_verbose_bot_logging: false
+enable_attachment_logging: false
+enable_arena_logging: false
+enable_zoom_logging: false
+enable_spawn_protection: true
+spawn_protection_duration_ms: 3000
 bot_count: 6
 bot_name_prefix: WarmupBot
+randomize_firearm_attachments: true
+firearm_attachment_randomization_mode: BotsOnly
 initial_setup_delay_ms: 1000
 join_setup_delay_ms: 1200
 human_respawn_delay_ms: 1200
@@ -18,6 +27,7 @@ bot_activation_retry_delay_ms: 450
 bot_activation_max_attempts: 6
 human_role: NtfPrivate
 bot_role: ChaosRifleman
+use_bot_role_default_loadout: true
 difficulty_preset: Normal
 
 human_loadout_presets:
@@ -58,6 +68,7 @@ human_loadout_presets:
     infinite_reserve_ammo: true
     equip_first_firearm: true
     refill_active_firearm_on_spawn: true
+    randomize_firearm_attachments_on_spawn: false
     items:
     - GunE11SR
     - ArmorCombat
@@ -75,6 +86,7 @@ human_loadout_presets:
     infinite_reserve_ammo: true
     equip_first_firearm: true
     refill_active_firearm_on_spawn: true
+    randomize_firearm_attachments_on_spawn: false
     items:
     - GunAK
     - ArmorCombat
@@ -92,6 +104,7 @@ human_loadout_presets:
     infinite_reserve_ammo: true
     equip_first_firearm: true
     refill_active_firearm_on_spawn: true
+    randomize_firearm_attachments_on_spawn: false
     items:
     - GunCrossvec
     - ArmorCombat
@@ -106,6 +119,7 @@ human_loadout:
   infinite_reserve_ammo: true
   equip_first_firearm: true
   refill_active_firearm_on_spawn: true
+  randomize_firearm_attachments_on_spawn: false
   items:
   - GunE11SR
   - ArmorCombat
@@ -120,6 +134,7 @@ bot_loadout:
   infinite_reserve_ammo: true
   equip_first_firearm: true
   refill_active_firearm_on_spawn: true
+  randomize_firearm_attachments_on_spawn: true
   items:
   - GunCrossvec
   - ArmorLight
@@ -128,32 +143,144 @@ bot_loadout:
   - type: Ammo9x19
     amount: 240
 
+dust2_map:
+  enabled: false
+  schematic_name: de_dust2
+  runtime_nav_mesh_enabled: true
+  runtime_nav_mesh_agent_radius: 0.18
+  runtime_nav_mesh_agent_height: 1.8
+  runtime_nav_mesh_agent_max_slope: 50.0
+  runtime_nav_mesh_agent_climb: 3.0
+  runtime_nav_mesh_use_render_meshes: true
+  runtime_nav_mesh_sample_distance: 3.0
+  runtime_nav_mesh_bounds_padding: 6.0
+  runtime_nav_mesh_min_region_area: 0.5
+  visualize_runtime_nav_mesh: true
+  runtime_nav_mesh_max_debug_edges: 6000
+  runtime_nav_mesh_debug_edge_width: 0.035
+  runtime_nav_mesh_debug_height_offset: 0.06
+  origin:
+    x: 0.0
+    y: 30.0
+    z: 30.0
+  rotation:
+    x: 0.0
+    y: 0.0
+    z: 0.0
+  scale:
+    x: 1.0
+    y: 1.0
+    z: 1.0
+  human_spawn_jitter_radius: 2.0
+  bot_spawn_jitter_radius: 2.0
+  remove_warmup_walls: true
+  human_spawn_marker_names:
+  - Spawnpoint_Counter
+  bot_spawn_marker_names:
+  - Spawnpoint_Terrorist
+
 bot_behavior:
   ai_mode: Classic
   enable_combat_actions: true
   enable_step_movement: true
   enable_obstacle_navigation: true
+  use_facility_nav_mesh: false
+  use_facility_surface_nav_mesh: true
+  facility_nav_mesh_sample_distance: 50.0
+  facility_runtime_nav_mesh_enabled: false
+  facility_surface_runtime_nav_mesh_enabled: true
+  facility_runtime_nav_mesh_agent_radius: 0.25
+  facility_runtime_nav_mesh_agent_height: 1.8
+  facility_runtime_nav_mesh_agent_max_slope: 65.0
+  facility_runtime_nav_mesh_agent_climb: 2.4
+  facility_runtime_nav_mesh_use_render_meshes: false
+  facility_runtime_nav_mesh_use_room_templates: true
+  facility_runtime_nav_mesh_bounds_padding: 8.0
+  facility_runtime_nav_mesh_min_region_area: 0.5
+  facility_runtime_nav_mesh_ignore_doors: true
+  facility_runtime_nav_mesh_log_build: false
+  facility_runtime_nav_mesh_create_off_mesh_links: false
+  facility_runtime_nav_mesh_max_off_mesh_links: 600
+  facility_runtime_nav_mesh_off_mesh_link_search_radius: 3.0
+  facility_runtime_nav_mesh_off_mesh_link_max_vertical_delta: 2.0
+  facility_runtime_nav_mesh_off_mesh_link_sample_spacing: 2.0
+  facility_runtime_nav_mesh_off_mesh_link_sample_distance: 6.0
+  facility_runtime_nav_mesh_off_mesh_link_width: 0.4
+  facility_runtime_nav_mesh_off_mesh_link_cost_modifier: 2
+  visualize_facility_nav_mesh: false
+  facility_runtime_nav_mesh_max_debug_edges: 12000
+  facility_runtime_nav_mesh_debug_edge_width: 0.025
+  facility_runtime_nav_mesh_debug_height_offset: 0.08
+  visualize_facility_nav_mesh_samples: false
+  facility_runtime_nav_mesh_max_debug_samples: 2500
+  facility_runtime_nav_mesh_debug_sample_spacing: 2.5
+  facility_runtime_nav_mesh_debug_sample_radius: 18.0
+  facility_runtime_nav_mesh_debug_sample_distance: 12.0
+  facility_runtime_nav_mesh_debug_sample_size: 0.3
+  visualize_facility_nav_agents: false
+  facility_nav_agent_debug_marker_size: 0.65
+  use_facility_dummy_follow_fallback: true
+  facility_nav_mesh_direct_position_control: false
+  facility_nav_mesh_direct_position_max_step: 2.5
+  facility_nav_mesh_direct_position_vertical_offset: 0.35
+  facility_nav_mesh_direct_position_max_drop_per_step: 1.4
+  facility_nav_mesh_direct_position_bridge_distance: 1.75
+  facility_dummy_follow_max_distance: 1000.0
+  facility_dummy_follow_min_distance: 1.75
+  facility_dummy_follow_speed: 7.5
+  facility_dummy_follow_speed_scp939: 7.5
+  facility_dummy_follow_speed_scp3114: 7.5
+  facility_dummy_follow_speed_scp049: 7.5
+  facility_dummy_follow_speed_scp106: 7.5
+  facility_dummy_follow_door_slow_speed: 3.5
+  enable_bot_door_opening: true
+  bot_door_open_radius: 3.5
+  bot_force_open_unlocked_doors: false
+  bot_wait_at_closed_doors: true
+  bot_wait_at_closed_doors_only_hcz: true
+  bot_closed_door_stop_radius: 2.75
   enable_vertical_aim: true
   target_aim_height_offset: 1.1
+  enable_global_vision_fallback: true
+  global_vision_max_vertical_delta: 25.0
   realistic_sight_memory_ms: 5000
   realistic_reacquire_delay_ms: 250
   realistic_initial_yaw_offset_max_degrees: 8.0
   realistic_initial_pitch_offset_max_degrees: 0.0
-  realistic_aim_settle_ms: 1300
+  realistic_aim_settle_ms: 2500
   realistic_reload_lock_offset_max_degrees: 0.75
   realistic_head_aim_height_offset: 1.45
   realistic_los_debug_logging: false
-  max_vertical_aim_degrees: 25.0
+  max_vertical_aim_degrees: 60.0
+  enable_far_target_aim_assist: true
+  far_target_aim_distance: 20.0
+  far_target_max_horizontal_aim_actions_per_tick: 5
+  far_target_max_vertical_aim_actions_per_tick: 4
+  far_target_horizontal_aim_deadzone_degrees: 0.5
+  far_target_vertical_aim_deadzone_degrees: 0.35
+  far_target_realistic_aim_settle_ms: 2500
   refill_ammo_between_bursts: true
   keep_magazine_filled: false
   use_zoom_while_shooting: false
-  think_interval_min_ms: 450
-  think_interval_max_ms: 850
+  use_zoom_for_far_targets: true
+  far_target_zoom_distance: 20.0
+  scp_attack_range: 5.5
+  enable_orbit_movement: true
+  orbit_retreat_distance: 6.3
+  orbit_retreat_bias: 1.35
+  close_retreat_speed_scale: 0.92
+  think_interval_min_ms: 55
+  think_interval_max_ms: 95
   min_shot_interval_ms: 140
   min_reload_attempt_interval_ms: 450
   shoot_release_delay_ms: 40
   debug_log_interval_ms: 800
   unstuck_duration_ms: 900
+  reactive_strafe_duration_ms: 2000
+  reactive_strafe_cooldown_ms: 7000
+  bot_forward_move_burst_count: 2
+  door_slow_forward_move_burst_count: 1
+  bot_door_slow_radius: 4.5
   stuck_tick_threshold: 2
   nav_waypoint_reach_distance: 0.9
   nav_recompute_interval_ms: 350
@@ -161,20 +288,57 @@ bot_behavior:
   nav_probe_distance: 2.5
   nav_lateral_probe_count: 3
   nav_target_move_recompute_distance: 1.75
-  nav_debug_logging: true
+  nav_mesh_corner_move_max_step: 0.75
+  nav_mesh_forward_move_max_angle_degrees: 50.0
+  nav_mesh_stuck_nudge_enabled: true
+  nav_mesh_stuck_nudge_step: 0.65
+  nav_mesh_stuck_nudge_max_distance: 8.0
+  nav_mesh_forward_clip_enabled: false
+  nav_mesh_forward_clip_step: 0.2
+  nav_mesh_room_center_teleport_enabled: false
+  nav_mesh_room_center_teleport_recovery_count: 8
+  nav_mesh_room_center_teleport_cooldown_ms: 4000
+  nav_mesh_room_center_teleport_sample_distance: 6.0
+  nav_mesh_stuck_door_teleport_enabled: true
+  nav_mesh_stuck_door_teleport_stuck_ms: 15000
+  nav_mesh_stuck_door_teleport_cooldown_ms: 7000
+  nav_mesh_stuck_door_teleport_sample_distance: 4.0
+  nav_mesh_local_detour_enabled: false
+  nav_mesh_local_detour_forward_distance: 1.6
+  nav_mesh_local_detour_lateral_distance: 2.0
+  nav_mesh_local_detour_max_waypoint_distance: 14.0
+  nav_debug_logging: false
+  navigation_execution_log_interval_ms: 750
+  enable_a_star_fallback_navigation: true
+  a_star_fallback_trigger_radius: 5.0
+  a_star_fallback_trigger_ms: 2500
+  a_star_grid_step: 1.75
+  a_star_search_padding: 8.0
+  a_star_max_node_count: 4096
   linear_move_tick_threshold: 3
   random_strafe_after_linear_chance_percent: 85
   strafe_direction_change_chance_percent: 35
-  preferred_range: 14.0
-  range_tolerance: 2.5
+  enable_no_target_patrol: true
+  no_target_patrol_min_distance: 8.0
+  no_target_patrol_max_distance: 45.0
+  no_target_patrol_reach_distance: 2.5
+  no_target_patrol_refresh_ms: 12000
+  preferred_range: 12.6
+  range_tolerance: 2.25
   stuck_distance_threshold: 0.45
   nearby_bot_avoidance_radius: 1.35
+  forward_stuck_jump_threshold_ms: 3500
+  forward_stuck_jump_interval_ms: 1000
+  forward_stuck_jump_burst_count: 2
   max_horizontal_aim_actions_per_tick: 3
   max_vertical_aim_actions_per_tick: 2
   horizontal_aim_deadzone_degrees: 1.5
   vertical_aim_deadzone_degrees: 1.0
+  jump_action_names:
+  - Jump
   shoot_press_action_name: Shoot->Click
   shoot_release_action_name: Shoot->Release
   alternate_shoot_press_action_name: ""
   reload_action_name: Reload->Click
-  zoom_action_name: Zoom->Click
+  zoom_action_name: Zoom->Hold
+  zoom_release_action_name: Zoom->Release

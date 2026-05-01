@@ -9,6 +9,9 @@ namespace ScpslPluginStarter;
 
 internal sealed class BotTargetingService
 {
+    private const int TargetSwitchLockMs = 1250;
+    private const float StickyTargetDistanceMultiplier = 1.35f;
+
     public BotTargetSelection? SelectTarget(
         Player bot,
         ManagedBotState state,
@@ -27,13 +30,18 @@ internal sealed class BotTargetingService
         }
 
         int nowTick = Environment.TickCount;
-        bool useRealistic = IsRealisticEnabledFor(bot, behavior);
         BotTargetSelection? closestVisible = null;
         BotTargetSelection? closestAny = null;
+        BotTargetSelection? currentTargetSelection = null;
 
         foreach (Player hostile in hostiles)
         {
-            BotTargetSelection selection = BuildSelection(bot, hostile, behavior, useRealistic);
+            BotTargetSelection selection = BuildSelection(bot, hostile, behavior);
+            if (selection.Target.PlayerId == state.Engagement.TargetPlayerId)
+            {
+                currentTargetSelection = selection;
+            }
+
             if (closestAny == null || selection.Distance < closestAny.Distance)
             {
                 closestAny = selection;
@@ -45,31 +53,129 @@ internal sealed class BotTargetingService
             }
         }
 
-        if (!useRealistic)
+        if (closestAny == null)
         {
             state.Engagement.Reset();
-            return closestAny;
+            return null;
         }
 
         if (closestVisible != null)
         {
             UpdateVisibleEngagement(state, closestVisible, behavior, random, nowTick);
+            state.TargetSwitchLockUntilTick = nowTick + TargetSwitchLockMs;
             return closestVisible;
         }
 
-        Player? rememberedTarget = hostiles.FirstOrDefault(candidate => candidate.PlayerId == state.Engagement.TargetPlayerId);
-        if (rememberedTarget != null && unchecked(nowTick - state.Engagement.LastSeenTick) <= behavior.RealisticSightMemoryMs)
+        if (currentTargetSelection != null
+            && currentTargetSelection.Target.PlayerId == state.Engagement.TargetPlayerId
+            && state.Engagement.LastSeenTick > 0)
         {
-            BotTargetSelection selection = BuildSelection(bot, rememberedTarget, behavior, useRealistic);
-            selection.HasLineOfSight = false;
-            selection.IsRememberedTarget = true;
-            selection.AimPoint = state.Engagement.LastKnownAimPoint;
-            state.Engagement.IsTargetVisible = false;
-            return selection;
+            currentTargetSelection.IsRememberedTarget = unchecked(nowTick - state.Engagement.LastSeenTick) <= behavior.RealisticSightMemoryMs;
+            if (!currentTargetSelection.IsRememberedTarget)
+            {
+                state.Engagement.Reset();
+                if (!behavior.EnableGlobalVisionFallback)
+                {
+                    return null;
+                }
+            }
+            else
+            {
+                currentTargetSelection.AimPoint = state.Engagement.LastKnownAimPoint;
+                state.Engagement.IsTargetVisible = false;
+                return currentTargetSelection;
+            }
+        }
+
+        if (currentTargetSelection != null
+            && currentTargetSelection.Target.PlayerId == state.Engagement.TargetPlayerId
+            && unchecked(state.TargetSwitchLockUntilTick - nowTick) > 0)
+        {
+            float stickyDistanceLimit = closestAny.Distance * StickyTargetDistanceMultiplier;
+            bool stickyAllowed = currentTargetSelection.Distance <= stickyDistanceLimit
+                || currentTargetSelection.HasLineOfSight;
+            if (stickyAllowed)
+            {
+                bool canReturnCurrentTarget = true;
+                if (!currentTargetSelection.HasLineOfSight)
+                {
+                    currentTargetSelection.IsRememberedTarget =
+                        state.Engagement.LastSeenTick > 0
+                        && unchecked(nowTick - state.Engagement.LastSeenTick) <= behavior.RealisticSightMemoryMs;
+                    if (currentTargetSelection.IsRememberedTarget)
+                    {
+                        currentTargetSelection.AimPoint = state.Engagement.LastKnownAimPoint;
+                    }
+                    else if (behavior.EnableGlobalVisionFallback)
+                    {
+                        if (!IsGlobalVisionEligible(bot, currentTargetSelection, behavior))
+                        {
+                            state.Engagement.Reset();
+                            canReturnCurrentTarget = false;
+                        }
+                        else
+                        {
+                            currentTargetSelection.IsGlobalVisionTarget = true;
+                        }
+                    }
+                    else
+                    {
+                        canReturnCurrentTarget = false;
+                    }
+                }
+
+                if (!canReturnCurrentTarget)
+                {
+                    stickyAllowed = false;
+                }
+                else if (currentTargetSelection.HasLineOfSight)
+                {
+                    UpdateVisibleEngagement(state, currentTargetSelection, behavior, random, nowTick);
+                }
+                else
+                {
+                    state.Engagement.IsTargetVisible = false;
+                }
+
+                if (canReturnCurrentTarget)
+                {
+                    return currentTargetSelection;
+                }
+            }
+        }
+
+        if (behavior.EnableGlobalVisionFallback)
+        {
+            BotTargetSelection? fallbackTarget = hostiles
+                .Select(hostile => BuildSelection(bot, hostile, behavior))
+                .Where(selection => IsGlobalVisionEligible(bot, selection, behavior))
+                .OrderBy(selection => selection.Distance)
+                .FirstOrDefault();
+            if (fallbackTarget == null)
+            {
+                state.Engagement.Reset();
+                return null;
+            }
+
+            fallbackTarget.IsGlobalVisionTarget = true;
+            UpdateGlobalVisionEngagement(state, fallbackTarget, nowTick);
+            state.TargetSwitchLockUntilTick = nowTick + TargetSwitchLockMs;
+            return fallbackTarget;
         }
 
         state.Engagement.Reset();
-        return closestAny;
+        return null;
+    }
+
+    private static bool IsGlobalVisionEligible(Player bot, BotTargetSelection selection, BotBehaviorDefinition behavior)
+    {
+        if (selection.HasLineOfSight)
+        {
+            return true;
+        }
+
+        float maxVerticalDelta = Mathf.Max(0f, behavior.GlobalVisionMaxVerticalDelta);
+        return Mathf.Abs(bot.Position.y - selection.Target.Position.y) <= maxVerticalDelta;
     }
 
     public static bool IsRealisticEnabledFor(Player bot, BotBehaviorDefinition behavior)
@@ -144,6 +250,26 @@ internal sealed class BotTargetingService
         state.Engagement.LastKnownAimPoint = selection.AimPoint;
     }
 
+    private static void UpdateGlobalVisionEngagement(ManagedBotState state, BotTargetSelection selection, int nowTick)
+    {
+        bool switchedTarget = state.Engagement.TargetPlayerId != selection.Target.PlayerId;
+        if (switchedTarget)
+        {
+            state.Engagement.TargetPlayerId = selection.Target.PlayerId;
+            state.Engagement.VisibleSinceTick = nowTick;
+            state.Engagement.ReactionReadyTick = nowTick;
+            state.Engagement.InitialYawOffset = 0f;
+            state.Engagement.InitialPitchOffset = 0f;
+            state.Engagement.HasPostReloadLock = false;
+            state.Engagement.ReloadLockYawOffset = 0f;
+            state.Engagement.ReloadLockPitchOffset = 0f;
+        }
+
+        state.Engagement.IsTargetVisible = false;
+        state.Engagement.LastSeenTick = 0;
+        state.Engagement.LastKnownAimPoint = selection.AimPoint;
+    }
+
     private static float RandomOffset(System.Random random, float maxAbsDegrees)
     {
         if (maxAbsDegrees <= 0f)
@@ -154,18 +280,33 @@ internal sealed class BotTargetingService
         return (float)((random.NextDouble() * 2d) - 1d) * maxAbsDegrees;
     }
 
-    private static BotTargetSelection BuildSelection(Player bot, Player target, BotBehaviorDefinition behavior, bool useLos)
+    private static BotTargetSelection BuildSelection(Player bot, Player target, BotBehaviorDefinition behavior)
     {
+        Vector3 bodyBase = target.Position;
+        Vector3 fallbackHeadAimPoint = bodyBase + Vector3.up * behavior.RealisticHeadAimHeightOffset;
+        Vector3 fallbackTorsoAimPoint = bodyBase + Vector3.up * behavior.TargetAimHeightOffset;
         Vector3 headAimPoint = target.Camera != null
             ? target.Camera.position
-            : target.Position + Vector3.up * behavior.RealisticHeadAimHeightOffset;
+            : fallbackHeadAimPoint;
         Vector3 torsoAimPoint = target.Camera != null
-            ? Vector3.Lerp(target.Position, headAimPoint, 0.55f)
-            : target.Position + Vector3.up * behavior.TargetAimHeightOffset;
+            ? Vector3.Lerp(bodyBase, headAimPoint, 0.55f)
+            : fallbackTorsoAimPoint;
         Vector3 eyeOrigin = GetEyeOrigin(bot, behavior.TargetAimHeightOffset);
 
-        bool headVisible = useLos && HasLineOfSight(bot, target, eyeOrigin, headAimPoint);
-        bool torsoVisible = useLos && HasLineOfSight(bot, target, eyeOrigin, torsoAimPoint);
+        bool headVisible = HasAnyLineOfSight(
+            bot,
+            target,
+            eyeOrigin,
+            headAimPoint,
+            fallbackHeadAimPoint,
+            torsoAimPoint);
+        bool torsoVisible = HasAnyLineOfSight(
+            bot,
+            target,
+            eyeOrigin,
+            torsoAimPoint,
+            fallbackTorsoAimPoint,
+            bodyBase + Vector3.up * (behavior.TargetAimHeightOffset * 0.75f));
         bool hasLineOfSight = headVisible || torsoVisible;
         Vector3 aimPoint = headVisible ? headAimPoint : torsoAimPoint;
         float distance = Vector3.Distance(bot.Position, target.Position);
@@ -175,6 +316,19 @@ internal sealed class BotTargetingService
             HeadHasLineOfSight = headVisible,
             TorsoHasLineOfSight = torsoVisible,
         };
+    }
+
+    private static bool HasAnyLineOfSight(Player source, Player target, Vector3 origin, params Vector3[] aimPoints)
+    {
+        foreach (Vector3 aimPoint in aimPoints)
+        {
+            if (HasLineOfSight(source, target, origin, aimPoint))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static Vector3 GetEyeOrigin(Player player, float fallbackHeight)
@@ -255,6 +409,8 @@ internal sealed class BotTargetSelection
     public bool HasLineOfSight { get; set; }
 
     public bool IsRememberedTarget { get; set; }
+
+    public bool IsGlobalVisionTarget { get; set; }
 
     public bool HeadHasLineOfSight { get; set; }
 

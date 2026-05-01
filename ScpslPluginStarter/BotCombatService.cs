@@ -1,6 +1,7 @@
 using System;
 using System.Linq;
 using LabApi.Features.Wrappers;
+using PlayerRoles;
 
 namespace ScpslPluginStarter;
 
@@ -31,26 +32,59 @@ internal sealed class BotCombatService
         out string? reason)
     {
         reason = null;
-        if (!BotTargetingService.IsRealisticEnabledFor(bot, behavior))
-        {
-            return true;
-        }
-
         if (!target.HasLineOfSight)
         {
-            reason = target.IsRememberedTarget
-                ? $"remembering target out of sight lastSeen={state.Engagement.LastSeenTick}"
-                : $"target blocked headLos={target.HeadHasLineOfSight} torsoLos={target.TorsoHasLineOfSight}";
-            return false;
-        }
-
-        if (unchecked(nowTick - state.Engagement.ReactionReadyTick) < 0)
-        {
-            reason = $"reaction {(state.Engagement.ReactionReadyTick - nowTick)}ms";
+            reason = "no-los";
             return false;
         }
 
         return true;
+    }
+
+    public bool CanAttack(
+        Player bot,
+        ManagedBotState state,
+        BotTargetSelection target,
+        BotBehaviorDefinition behavior,
+        FirearmItem? firearm,
+        int nowTick,
+        out string? reason)
+    {
+        if (firearm != null)
+        {
+            return CanShoot(bot, state, target, behavior, nowTick, out reason);
+        }
+
+        reason = null;
+        if (!IsSupportedScpAttacker(bot.Role))
+        {
+            reason = "no-weapon";
+            return false;
+        }
+
+        if (!target.HasLineOfSight)
+        {
+            reason = "no-los";
+            return false;
+        }
+
+        float range = Math.Max(0.5f, behavior.ScpAttackRange);
+        if (target.Distance > range)
+        {
+            reason = $"out-of-range {target.Distance:F1}>{range:F1}";
+            return false;
+        }
+
+        return true;
+    }
+
+    public static bool IsSupportedScpAttacker(RoleTypeId role)
+    {
+        return role == RoleTypeId.Scp049
+            || role == RoleTypeId.Scp939
+            || role == RoleTypeId.Scp3114
+            || role == RoleTypeId.Scp0492
+            || role == RoleTypeId.Scp106;
     }
 
     public void OnReloaded(ManagedBotState state, BotBehaviorDefinition behavior, System.Random random)

@@ -1,2 +1,8 @@
 bin/
 obj/
+ExportedSCPSL/
+.vs/
+*.user
+*.suo
+*.tmp
+*.log

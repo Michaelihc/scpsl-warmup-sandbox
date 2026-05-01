@@ -3,37 +3,73 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
+using AdminToys;
+using CommandSystem.Commands.RemoteAdmin.Dummies;
+using CustomPlayerEffects;
 using InventorySystem.Items;
+using InventorySystem.Items.Firearms.Attachments;
 using LabApi.Events.Arguments.PlayerEvents;
 using LabApi.Events.Arguments.ServerEvents;
 using LabApi.Events.Handlers;
 using LabApi.Features.Wrappers;
 using LabApi.Loader.Features.Plugins;
+using MapGeneration;
 using Mirror;
 using NetworkManagerUtils.Dummies;
 using NorthwoodLib;
 using PlayerRoles;
 using UnityEngine;
+using UnityEngine.AI;
 using ApiLogger = LabApi.Features.Console.Logger;
+using PrimitiveObjectToyWrapper = LabApi.Features.Wrappers.PrimitiveObjectToy;
 
 namespace ScpslPluginStarter;
 
 public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 {
+    private static readonly int[] ArenaSpawnCorrectionDelaysMs = { 150, 450, 900 };
+    private const int BotPreForceRoleDelayMs = 350;
+    private const int BotArenaSpawnDelayMs = 3000;
+    private const int BotPostSpawnHookDelayMs = 500;
+    private const int BotBrainReadyRetryDelayMs = 250;
+    private const int BotBrainReadyMaxAttempts = 40;
+    private const int NavHeartbeatIntervalMs = 5000;
+    private const ushort DefaultReserveAmmoTarget = 240;
+    private static readonly int[] BotAttachmentRandomizationDelaysMs = { 250, 1000, 2500 };
+
     private static readonly ActionDispatcher? MainThreadActions = typeof(MainThreadDispatcher)
         .GetField("UpdateDispatcher", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)?
         .GetValue(null) as ActionDispatcher;
+    private static readonly MethodInfo? DummyActionCollectorGetCacheMethod = typeof(DummyActionCollector)
+        .GetMethod("GetCache", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+    private static readonly MethodInfo? DummyActionCacheUpdateMethod = DummyActionCollectorGetCacheMethod?.ReturnType
+        .GetMethod("UpdateCache", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+    private static readonly FieldInfo? DummyActionProvidersField = DummyActionCollectorGetCacheMethod?.ReturnType
+        .GetField("_providers", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+    private static readonly MethodInfo? RootDummyPopulateActionsMethod = DummyActionProvidersField?.FieldType.GetElementType()
+        ?.GetMethod("PopulateDummyActions", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+    private static readonly MethodInfo? AttachmentsServerApplyPreferenceMethod = typeof(AttachmentsServerHandler)
+        .GetMethod(
+            "ServerApplyPreference",
+            BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic,
+            null,
+            new[] { typeof(ReferenceHub), typeof(ItemType), typeof(uint) },
+            null);
 
     private readonly Dictionary<int, ManagedBotState> _managedBots = new();
     private readonly Dictionary<int, string> _selectedHumanLoadouts = new();
     private readonly System.Random _random = new();
     private readonly HumanPresetService _humanPresetService = new();
-    private readonly BotTargetingService _botTargetingService = new();
     private readonly BotCombatService _botCombatService = new();
-    private readonly BotAimService _botAimService = new();
-    private readonly BotMovementService _botMovementService = new();
+    private readonly BotControllerService _botControllerService = new();
+    private readonly Dust2MapService _dust2MapService = new();
+    private readonly FacilityNavMeshService _facilityNavMeshService = new();
+    private readonly BombModeService _bombModeService = new();
+    private readonly List<PrimitiveObjectToyWrapper> _runtimeNavMeshDebugEdges = new();
+    private readonly Dictionary<int, PrimitiveObjectToyWrapper> _navAgentDebugToys = new();
     private int _botSequence;
     private int _warmupGeneration;
+    private int _roundCampDisabledUntilTick;
     private bool _warmupActive;
 
     public static WarmupSandboxPlugin? Instance { get; private set; }
@@ -46,7 +82,9 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     public override void Enable()
     {
         Instance = this;
+        WarmupLocalization.SetLanguage(Config.Language);
         ApplyDifficultyPreset(Config.DifficultyPreset, persist: false);
+        ApplyNativeSpawnProtectionConfig();
         ServerEvents.WaitingForPlayers += OnWaitingForPlayers;
         ServerEvents.RoundStarted += OnRoundStarted;
         ServerEvents.RoundRestarted += OnRoundRestarted;
@@ -54,10 +92,21 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         PlayerEvents.Joined += OnPlayerJoined;
         PlayerEvents.Spawned += OnPlayerSpawned;
         PlayerEvents.Death += OnPlayerDeath;
+        PlayerEvents.Hurt += OnPlayerHurt;
         PlayerEvents.Left += OnPlayerLeft;
         PlayerEvents.ShotWeapon += OnPlayerShotWeapon;
         PlayerEvents.ReloadedWeapon += OnPlayerReloadedWeapon;
         PlayerEvents.ChangedItem += OnPlayerChangedItem;
+        PlayerEvents.SearchedToy += OnPlayerSearchedToy;
+        PlayerEvents.SearchingToy += OnPlayerSearchingToy;
+        PlayerEvents.SearchToyAborted += OnPlayerSearchToyAborted;
+        PlayerEvents.UsingItem += OnPlayerUsingItem;
+        PlayerEvents.UsedItem += OnPlayerUsedItem;
+        PlayerEvents.CancelledUsingItem += OnPlayerCancelledUsingItem;
+        PlayerEvents.SearchingPickup += OnPlayerSearchingPickup;
+        PlayerEvents.PickingUpItem += OnPlayerPickingUpItem;
+        PlayerEvents.DroppedItem += OnPlayerDroppedItem;
+        PlayerEvents.Cuffing += OnPlayerCuffing;
         ApiLogger.Info($"[{Name}] Enabled.");
     }
 
@@ -71,9 +120,23 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         _warmupGeneration++;
         _warmupActive = false;
         CleanupManagedBots();
+        _bombModeService.ResetRuntime();
+        CleanupArenaMap(returnHumansToFacility: true);
+        _facilityNavMeshService.RemoveRuntimeNavMesh();
+        PlayerEvents.Cuffing -= OnPlayerCuffing;
+        PlayerEvents.DroppedItem -= OnPlayerDroppedItem;
+        PlayerEvents.PickingUpItem -= OnPlayerPickingUpItem;
+        PlayerEvents.SearchingPickup -= OnPlayerSearchingPickup;
+        PlayerEvents.CancelledUsingItem -= OnPlayerCancelledUsingItem;
+        PlayerEvents.UsedItem -= OnPlayerUsedItem;
+        PlayerEvents.UsingItem -= OnPlayerUsingItem;
+        PlayerEvents.SearchToyAborted -= OnPlayerSearchToyAborted;
+        PlayerEvents.SearchingToy -= OnPlayerSearchingToy;
+        PlayerEvents.SearchedToy -= OnPlayerSearchedToy;
         PlayerEvents.ChangedItem -= OnPlayerChangedItem;
         PlayerEvents.ReloadedWeapon -= OnPlayerReloadedWeapon;
         PlayerEvents.ShotWeapon -= OnPlayerShotWeapon;
+        PlayerEvents.Hurt -= OnPlayerHurt;
         PlayerEvents.Left -= OnPlayerLeft;
         PlayerEvents.Death -= OnPlayerDeath;
         PlayerEvents.Spawned -= OnPlayerSpawned;
@@ -95,6 +158,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     private void OnRoundStarted()
     {
+        _roundCampDisabledUntilTick = Environment.TickCount + BotControllerService.GetCampCooldownMs();
         if (Config.AutoStartOnRoundStarted)
         {
             RestartWarmup("round started");
@@ -105,7 +169,11 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     {
         _warmupGeneration++;
         _warmupActive = false;
+        _roundCampDisabledUntilTick = 0;
         CleanupManagedBots();
+        _bombModeService.ResetRuntime();
+        CleanupArenaMap(returnHumansToFacility: true);
+        _facilityNavMeshService.RemoveRuntimeNavMesh();
     }
 
     private void OnRoundEndingConditionsCheck(RoundEndingConditionsCheckEventArgs ev)
@@ -150,10 +218,21 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         int currentGeneration = _warmupGeneration;
         Schedule(() =>
         {
-            if (IsCurrentGeneration(currentGeneration) && IsManagedHuman(ev.Player))
+            if (!IsCurrentGeneration(currentGeneration) || !IsManagedHuman(ev.Player))
             {
-                RespawnHuman(ev.Player);
+                return;
             }
+
+            if (IsBombModeRoundActive())
+            {
+                ev.Player.SetRole(RoleTypeId.Spectator, RoleChangeReason.RemoteAdmin, RoleSpawnFlags.None);
+                ev.Player.SendHint(WarmupLocalization.T(
+                    "Bomb round is already in progress. You will join on the next round.",
+                    "爆破回合已在进行中。你将在下一回合加入。"), 5f);
+                return;
+            }
+
+            RespawnHuman(ev.Player);
         }, Config.JoinSetupDelayMs);
     }
 
@@ -173,12 +252,14 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             }
 
             ConfigureSpawnedBot(ev.Player);
+            GrantSpawnProtection(ev.Player);
             return;
         }
 
         if (IsManagedHuman(ev.Player) && ev.Player.Role != RoleTypeId.Spectator)
         {
             ConfigureSpawnedHuman(ev.Player);
+            GrantSpawnProtection(ev.Player);
         }
     }
 
@@ -197,21 +278,68 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                 botState.RespawnRole = ev.Player.Role;
             }
 
+            if (IsBombModeRoundActive())
+            {
+                CancelBotBrainForRound(ev.Player.PlayerId);
+                return;
+            }
+
             ScheduleBotRespawn(ev.Player.PlayerId);
             return;
         }
 
         if (IsManagedHuman(ev.Player))
         {
+            if (IsBombModeRoundActive())
+            {
+                return;
+            }
+
             ScheduleHumanRespawn(ev.Player.PlayerId);
         }
+    }
+
+    private void GrantSpawnProtection(Player player)
+    {
+        if (!Config.EnableSpawnProtection
+            || Config.SpawnProtectionDurationMs <= 0
+            || player.ReferenceHub == null)
+        {
+            return;
+        }
+
+        ApplyNativeSpawnProtectionConfig();
+        SpawnProtected.TryGiveProtection(player.ReferenceHub);
+    }
+
+    private void ApplyNativeSpawnProtectionConfig()
+    {
+        SpawnProtected.IsProtectionEnabled = Config.EnableSpawnProtection;
+        SpawnProtected.SpawnDuration = Math.Max(0f, Config.SpawnProtectionDurationMs / 1000f);
+    }
+
+    private void OnPlayerHurt(PlayerHurtEventArgs ev)
+    {
+        if (!_warmupActive
+            || !IsManagedBot(ev.Player)
+            || !_managedBots.TryGetValue(ev.Player.PlayerId, out ManagedBotState state))
+        {
+            return;
+        }
+
+        if (ev.Attacker == null || !AreCombatantsHostile(ev.Player, ev.Attacker))
+        {
+            return;
+        }
+
+        TriggerReactiveStrafe(ev.Player, state, ev.Attacker);
     }
 
     private void OnPlayerLeft(PlayerLeftEventArgs ev)
     {
         _selectedHumanLoadouts.Remove(ev.Player.PlayerId);
 
-        if (_managedBots.Remove(ev.Player.PlayerId))
+        if (RemoveManagedBot(ev.Player.PlayerId))
         {
             EnsureBotPopulation(_warmupGeneration);
         }
@@ -266,10 +394,62 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     private void OnPlayerChangedItem(PlayerChangedItemEventArgs ev)
     {
+        _bombModeService.OnChangedItem(ev);
+
         if (_warmupActive && IsManagedParticipant(ev.Player))
         {
             MaintainReserveAmmo(ev.Player, ev.NewItem as FirearmItem);
         }
+    }
+
+    private void OnPlayerSearchedToy(PlayerSearchedToyEventArgs ev)
+    {
+        _bombModeService.OnSearchedToy(ev);
+    }
+
+    private void OnPlayerSearchingToy(PlayerSearchingToyEventArgs ev)
+    {
+        _bombModeService.OnSearchingToy(ev);
+    }
+
+    private void OnPlayerSearchToyAborted(PlayerSearchToyAbortedEventArgs ev)
+    {
+        _bombModeService.OnSearchToyAborted(ev);
+    }
+
+    private void OnPlayerUsingItem(PlayerUsingItemEventArgs ev)
+    {
+        _bombModeService.OnUsingItem(ev);
+    }
+
+    private void OnPlayerUsedItem(PlayerUsedItemEventArgs ev)
+    {
+        _bombModeService.OnUsedItem(ev);
+    }
+
+    private void OnPlayerCancelledUsingItem(PlayerCancelledUsingItemEventArgs ev)
+    {
+        _bombModeService.OnCancelledUsingItem(ev);
+    }
+
+    private void OnPlayerSearchingPickup(PlayerSearchingPickupEventArgs ev)
+    {
+        _bombModeService.OnSearchingPickup(ev);
+    }
+
+    private void OnPlayerPickingUpItem(PlayerPickingUpItemEventArgs ev)
+    {
+        _bombModeService.OnPickingUpItem(ev);
+    }
+
+    private void OnPlayerDroppedItem(PlayerDroppedItemEventArgs ev)
+    {
+        _bombModeService.OnDroppedItem(ev);
+    }
+
+    private void OnPlayerCuffing(PlayerCuffingEventArgs ev)
+    {
+        _bombModeService.OnCuffing(ev);
     }
 
     private void RestartWarmup(string reason)
@@ -279,6 +459,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         ApiLogger.Info($"[{Name}] Starting warmup sandbox ({reason}).");
         CleanupManagedBots();
         int generation = _warmupGeneration;
+        ScheduleNavHeartbeat(generation);
         Schedule(() => SetupWarmup(generation), Config.InitialSetupDelayMs);
     }
 
@@ -296,6 +477,9 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             return;
         }
 
+        PrepareArenaMapForWarmup();
+        PrepareFacilityNavMeshForWarmup();
+
         foreach (Player player in Player.List.Where(IsManagedHuman))
         {
             RespawnHuman(player);
@@ -311,11 +495,19 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             EnsureBotPopulation(generation);
         }, Config.BotSpawnDelayMs);
 
+        if (_bombModeService.Enabled)
+        {
+            int bombRoundDelayMs = Config.BotSpawnDelayMs + Config.BotRoleAssignDelayMs + Config.BotInitialActivationDelayMs + 500;
+            Schedule(() => BeginBombModeRound(generation), bombRoundDelayMs);
+        }
+
         if (Config.BroadcastWarmupStatus)
         {
             foreach (Player player in Player.List.Where(IsManagedHuman))
             {
-                player.SendHint($"{Name} active: {Config.BotCount} bots.", 4f);
+                player.SendHint(WarmupLocalization.T(
+                    $"{Name} active: {Config.BotCount} bots.",
+                    $"{Name} 已启用：{Config.BotCount} 个机器人。"), 4f);
             }
         }
     }
@@ -385,6 +577,11 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
         state.SpawnSetupCompleted = false;
         state.LastPosition = bot.Position;
+        state.ResetNavigationRuntimeState();
+        state.LastMoveIntentLabel = "none";
+        state.LastMoveIntentTick = 0;
+        state.ForwardStallSinceTick = 0;
+        state.NextForwardJumpTick = 0;
         state.StuckTicks = 0;
         state.UnstuckUntilTick = 0;
         state.ConsecutiveLinearMoves = 0;
@@ -396,7 +593,21 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         state.LastShotEventTick = 0;
         state.DryFireCount = 0;
         state.LoggedShootActionCatalog = false;
-
+        state.ZoomHeld = false;
+        state.ZoomHeldTargetPlayerId = -1;
+        state.LastZoomDebugTick = 0;
+        state.AiState = BotAiState.Chase;
+        state.AiStateEnteredTick = Environment.TickCount;
+        state.OrbitDirection = _random.Next(0, 2) == 0 ? -1 : 1;
+        state.NextStrafeFlipTick = 0;
+        state.ReactiveStrafeUntilTick = 0;
+        state.CampUntilTick = 0;
+        state.CampCooldownUntilTick = 0;
+        ApplyRoundCampGate(state);
+        state.CampAimPoint = default;
+        state.TargetSwitchLockUntilTick = 0;
+        state.LastStateSummary = "chase";
+        state.LastTargetSummary = "none";
         bot.SetRole(GetBotRespawnRole(state), RoleChangeReason.RemoteAdmin, RoleSpawnFlags.All);
         ScheduleInitialBotActivation(bot.PlayerId, generation, attempt: 0);
     }
@@ -436,7 +647,10 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             }
 
             LogBotEvent(state, $"initial-activation retry={attempt} reason=not-ready");
-            ConfigureSpawnedBot(bot);
+            if (!state.SpawnSetupCompleted)
+            {
+                ConfigureSpawnedBot(bot);
+            }
             ScheduleNextInitialActivationAttempt(playerId, generation, attempt);
         }, attempt == 0 ? Config.BotInitialActivationDelayMs : Config.BotActivationRetryDelayMs);
     }
@@ -447,10 +661,17 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         LoadoutDefinition? loadout = GetHumanLoadout(player);
         if (!(preset?.UseRoleDefaultLoadout ?? false) && loadout != null)
         {
-            ApplyLoadout(player, loadout);
+            ApplyLoadout(player, loadout, isBot: false);
         }
 
+        ApplyArenaSpawnIfNeeded(player, isBot: false);
         RestoreVitals(player);
+        EnsureFirearmEquipped(player);
+        MaintainReserveAmmo(player, player.CurrentItem as FirearmItem);
+        if (Config.EnableArenaLogging)
+        {
+            ApiLogger.Info($"[{Name}] [HumanSpawn:{player.Nickname}] role={player.Role} team={player.Team} isNTF={player.IsNTF} isChaos={player.IsChaos} pos=({player.Position.x:F1},{player.Position.y:F1},{player.Position.z:F1})");
+        }
     }
 
     private void ConfigureSpawnedBot(Player player)
@@ -465,10 +686,23 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             state.RespawnRole = player.Role;
         }
 
-        ApplyLoadout(player, Config.BotLoadout);
+        LoadoutDefinition? botLoadout = GetBotLoadout(player, state);
+        if (!Config.UseBotRoleDefaultLoadout && botLoadout != null)
+        {
+            ApplyLoadout(player, botLoadout, isBot: true);
+        }
+        EnsureFirearmEquipped(player);
+        MaintainReserveAmmo(player, player.CurrentItem as FirearmItem);
+        RandomizeBotInventoryFirearmAttachments(player, "spawn-configure");
+        int arenaReadyDelayMs = ApplyArenaSpawnIfNeeded(player, isBot: true);
         RestoreVitals(player);
         state.SpawnSetupCompleted = true;
         state.LastPosition = player.Position;
+        state.ResetNavigationRuntimeState();
+        state.LastMoveIntentLabel = "none";
+        state.LastMoveIntentTick = 0;
+        state.ForwardStallSinceTick = 0;
+        state.NextForwardJumpTick = 0;
         state.StuckTicks = 0;
         state.UnstuckUntilTick = 0;
         state.ConsecutiveLinearMoves = 0;
@@ -480,8 +714,42 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         state.LastShotEventTick = 0;
         state.DryFireCount = 0;
         state.LoggedShootActionCatalog = false;
+        state.ZoomHeld = false;
+        state.ZoomHeldTargetPlayerId = -1;
+        state.LastZoomDebugTick = 0;
+        state.HasStallAnchor = false;
+        state.StallAnchorPosition = default;
+        state.StallAnchorSinceTick = 0;
+        state.AStarFallbackActive = false;
+        state.AiState = BotAiState.Chase;
+        state.AiStateEnteredTick = Environment.TickCount;
+        state.OrbitDirection = _random.Next(0, 2) == 0 ? -1 : 1;
+        state.NextStrafeFlipTick = 0;
+        state.CampUntilTick = 0;
+        state.CampCooldownUntilTick = 0;
+        ApplyRoundCampGate(state);
+        state.CampAimPoint = default;
+        state.TargetSwitchLockUntilTick = 0;
+        state.LastStateSummary = "chase";
+        state.LastTargetSummary = "none";
         state.BrainToken++;
-        ScheduleBotBrain(player.PlayerId, state.BrainToken, _warmupGeneration);
+        int brainToken = state.BrainToken;
+        ScheduleBotAttachmentRandomizationChecks(player.PlayerId, brainToken, _warmupGeneration);
+        Schedule(() =>
+        {
+            if (!IsCurrentGeneration(_warmupGeneration)
+                || !_managedBots.TryGetValue(player.PlayerId, out ManagedBotState latest)
+                || latest.BrainToken != brainToken
+                || !Player.TryGet(player.PlayerId, out Player liveBot)
+                || liveBot.IsDestroyed
+                || liveBot.Role == RoleTypeId.Spectator)
+            {
+                return;
+            }
+
+            EnsureFirearmEquipped(liveBot);
+            ScheduleBotBrain(player.PlayerId, brainToken, _warmupGeneration);
+        }, arenaReadyDelayMs);
     }
 
     private void ScheduleBotRespawn(int playerId)
@@ -492,6 +760,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
 
         state.SpawnSetupCompleted = false;
+        state.ResetNavigationRuntimeState();
         state.BrainToken++;
         int token = state.BrainToken;
         int generation = _warmupGeneration;
@@ -506,19 +775,77 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
             if (Player.TryGet(playerId, out Player bot))
             {
-                bot.SetRole(GetBotRespawnRole(state), RoleChangeReason.Respawn, RoleSpawnFlags.All);
+                Schedule(() =>
+                {
+                    if (!IsCurrentGeneration(generation)
+                        || !_managedBots.TryGetValue(playerId, out ManagedBotState liveState)
+                        || liveState.BrainToken != token
+                        || !Player.TryGet(playerId, out Player liveBot)
+                        || liveBot.IsDestroyed)
+                    {
+                        return;
+                    }
+
+                    liveBot.SetRole(GetBotRespawnRole(liveState), RoleChangeReason.Respawn, RoleSpawnFlags.All);
+                }, BotPreForceRoleDelayMs);
                 return;
             }
 
-            _managedBots.Remove(playerId);
+            RemoveManagedBot(playerId);
             EnsureBotPopulation(generation);
         }, Config.BotRespawnDelayMs);
     }
 
     private void ScheduleBotBrain(int playerId, int brainToken, int generation)
     {
-        int delay = Next(Config.BotBehavior.ThinkIntervalMinMs, Config.BotBehavior.ThinkIntervalMaxMs);
+        int minDelay = Config.BotBehavior.ThinkIntervalMinMs;
+        int maxDelay = Config.BotBehavior.ThinkIntervalMaxMs;
+        if (_managedBots.TryGetValue(playerId, out ManagedBotState state) && state.AiState == BotAiState.Camp)
+        {
+            minDelay = Math.Max(1, minDelay / 2);
+            maxDelay = Math.Max(minDelay + 1, maxDelay / 2);
+        }
+
+        int delay = Next(minDelay, maxDelay);
         Schedule(() => RunBotBrain(playerId, brainToken, generation), delay);
+    }
+
+    private void ScheduleBotBrainWhenReady(int playerId, int brainToken, int generation, int attempt)
+    {
+        if (!IsCurrentGeneration(generation) || !_warmupActive)
+        {
+            return;
+        }
+
+        if (!_managedBots.TryGetValue(playerId, out ManagedBotState state) || state.BrainToken != brainToken)
+        {
+            return;
+        }
+
+        if (_roundCampDisabledUntilTick != 0)
+        {
+            state.CampCooldownUntilTick = Math.Max(state.CampCooldownUntilTick, _roundCampDisabledUntilTick);
+        }
+
+        if (!Player.TryGet(playerId, out Player bot) || bot.IsDestroyed || bot.Role == RoleTypeId.Spectator)
+        {
+            return;
+        }
+
+        if (IsBotCombatReady(bot))
+        {
+            ScheduleBotBrain(playerId, brainToken, generation);
+            return;
+        }
+
+        if (attempt >= BotBrainReadyMaxAttempts)
+        {
+            LogBotEvent(state, $"brain-start forcing retry={attempt} reason=not-ready");
+            ScheduleBotBrain(playerId, brainToken, generation);
+            return;
+        }
+
+        Schedule(() => ScheduleBotBrainWhenReady(playerId, brainToken, generation, attempt + 1), BotBrainReadyRetryDelayMs);
     }
 
     private void ScheduleNextInitialActivationAttempt(int playerId, int generation, int attempt)
@@ -553,136 +880,101 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             return;
         }
 
-        BotTargetSelection? target = _botTargetingService.SelectTarget(
+        ApplyRoundCampGate(state);
+        bool useDust2Arena = ShouldUseDust2Arena() && _dust2MapService.IsLoaded;
+        bool useDust2NavMesh = useDust2Arena
+            && Config.Dust2Map.RuntimeNavMeshEnabled
+            && _dust2MapService.HasRuntimeNavMesh;
+        bool useSurfaceNavMesh = !useDust2Arena && ShouldUseFacilitySurfaceNavMesh(bot);
+        bool useNavMesh = useDust2NavMesh || useSurfaceNavMesh;
+        float navMeshSampleDistance = useDust2Arena
+            ? Config.Dust2Map.RuntimeNavMeshSampleDistance
+            : useSurfaceNavMesh
+                ? Config.BotBehavior.FacilityNavMeshSampleDistance
+                : 0f;
+        _botControllerService.TickBot(
             bot,
             state,
-            Player.List,
+            Player.List.ToList(),
             Config.BotBehavior,
-            _random);
-
-        if (target != null)
-        {
-            FirearmItem? firearm = _botCombatService.EnsureFirearmEquipped(bot);
-            LogCombatState(bot, state, target, firearm);
-            _botAimService.AimAt(bot, state, target, Config.BotBehavior, TryInvokeDummyAction, LogAimStep, LogAimDebug);
-            int nowTick = Environment.TickCount;
-            bool aimAligned = _botAimService.IsAimAligned(bot, state, Config.BotBehavior);
-            string? shootReason = null;
-            bool shotCooldownActive = firearm != null
-                && unchecked(nowTick - state.LastShotTick) < Config.BotBehavior.MinShotIntervalMs;
-            bool canShoot = firearm != null
-                && _botCombatService.CanShoot(bot, state, target, Config.BotBehavior, nowTick, out shootReason);
-            float retreatStartDistance =
-                Config.BotBehavior.PreferredRange - Config.BotBehavior.RangeTolerance + Config.BotBehavior.RetreatStartDistanceBuffer;
-            bool spacingRetreatRequired = target.Distance < retreatStartDistance;
-            bool shouldPressureMove = target.IsRememberedTarget
-                || !target.HasLineOfSight
-                || !aimAligned
-                || shotCooldownActive
-                || !canShoot;
-            bool movementExpected = spacingRetreatRequired
-                || shouldPressureMove
-                || target.Distance > Config.BotBehavior.PreferredRange + Config.BotBehavior.RangeTolerance;
-            _botMovementService.UpdateStuckState(bot, state, Config.BotBehavior.StuckDistanceThreshold, movementExpected);
-            string moveState = spacingRetreatRequired
-                ? "retreat"
-                : target.Distance > Config.BotBehavior.PreferredRange + Config.BotBehavior.RangeTolerance
-                    ? "chase"
-                    : "hold";
-            LogNavDebug(
-                bot,
-                state,
-                $"move-state state={moveState} range={target.Distance:F1} retreatAt={retreatStartDistance:F1} preferred={Config.BotBehavior.PreferredRange:F1} tolerance={Config.BotBehavior.RangeTolerance:F1} visible={target.HasLineOfSight} remembered={target.IsRememberedTarget} aimAligned={aimAligned} canShoot={canShoot} shotCooldown={shotCooldownActive} pressure={shouldPressureMove}");
-
-            if (spacingRetreatRequired)
-            {
-                _botMovementService.MoveBot(
-                    bot,
-                    state,
-                    target.Target.Position,
-                    Player.List,
-                    Config.BotBehavior,
-                    TryInvokeDummyAction,
-                    Next,
-                    IsManagedBot,
-                    LogNavDebug);
-            }
-            else if (shouldPressureMove)
-            {
-                _botMovementService.PursueTargetDirectly(
-                    bot,
-                    state,
-                    target.Target.Position,
-                    Player.List,
-                    Config.BotBehavior,
-                    TryInvokeDummyAction,
-                    Next,
-                    LogNavDebug);
-            }
-            else
-            {
-                _botMovementService.MoveBot(
-                    bot,
-                    state,
-                    target.Target.Position,
-                    Player.List,
-                    Config.BotBehavior,
-                    TryInvokeDummyAction,
-                    Next,
-                    IsManagedBot,
-                    LogNavDebug);
-            }
-
-            if (firearm != null)
-            {
-                MaintainReserveAmmo(bot, firearm);
-                if (Config.BotBehavior.KeepMagazineFilled)
-                {
-                    RefillFirearm(firearm);
-                }
-                else if (firearm.IsReloadingOrUnloading)
-                {
-                    ScheduleBotBrain(playerId, brainToken, generation);
-                    return;
-                }
-                else if (GetLoadedAmmo(firearm) <= 1)
-                {
-                    TryReloadBot(bot, state, firearm);
-                    ScheduleBotBrain(playerId, brainToken, generation);
-                    return;
-                }
-            }
-
-            if (Config.BotBehavior.EnableCombatActions && firearm != null)
-            {
-                if (canShoot && !shotCooldownActive)
-                {
-                    TryShootBot(bot, state, target.Target, brainToken, generation);
-                }
-                else
-                {
-                    string reason = shotCooldownActive
-                        ? "cooldown"
-                        : (shootReason ?? (!aimAligned ? "not-aimed" : "blocked"));
-                    LogBotDebug(
-                        state,
-                        $"shot-skip {reason} target={target.Target.Nickname}#{target.Target.PlayerId} distance={target.Distance:F1} remembered={target.IsRememberedTarget} visible={target.HasLineOfSight} aimAligned={aimAligned} headLos={target.HeadHasLineOfSight} torsoLos={target.TorsoHasLineOfSight}");
-                }
-            }
-            else if (Config.BotBehavior.EnableCombatActions)
-            {
-                string inventory = string.Join(",", bot.Items.Select(item => item.Type.ToString()));
-                LogBotDebug(state, $"shot-skip no-firearm current={bot.CurrentItem?.Type.ToString() ?? "none"} inventory=[{inventory}]");
-            }
-        }
-        else
-        {
-            _botMovementService.UpdateStuckState(bot, state, Config.BotBehavior.StuckDistanceThreshold, movementExpected: false);
-            state.Engagement.Reset();
-            LogBotDebug(state, "no-target");
-        }
+            _random,
+            useDust2Arena,
+            useNavMesh,
+            navMeshSampleDistance,
+            useDust2Arena,
+            TryInvokeDummyAction,
+            TryInvokeDummyAction,
+            TryShootBot,
+            TryReloadBot,
+            MaintainReserveAmmo,
+            LogNavDebug,
+            UpdateFacilityDummyFollower,
+            UpdateZoomHold,
+            brainToken,
+            generation);
+        UpdateFacilityNavAgentFollower(bot, state, useNavMesh, useDust2Arena);
+        UpdateNavAgentDebugVisual(bot, state, useNavMesh, useDust2Arena);
 
         ScheduleBotBrain(playerId, brainToken, generation);
+    }
+
+    private void ApplyRoundCampGate(ManagedBotState state)
+    {
+        if (_roundCampDisabledUntilTick == 0)
+        {
+            return;
+        }
+
+        state.CampCooldownUntilTick = Math.Max(state.CampCooldownUntilTick, _roundCampDisabledUntilTick);
+    }
+
+    private bool ShouldUseFacilitySurfaceNavMesh(Player bot)
+    {
+        return Config.BotBehavior.UseFacilitySurfaceNavMesh
+            && Config.BotBehavior.FacilitySurfaceRuntimeNavMeshEnabled
+            && _facilityNavMeshService.HasRuntimeNavMesh
+            && TryGetClosestRoomZone(bot.Position, out FacilityZone zone)
+            && zone == FacilityZone.Surface;
+    }
+
+    private static bool TryGetClosestRoomZone(Vector3 position, out FacilityZone zone)
+    {
+        zone = FacilityZone.None;
+        if (Room.List == null)
+        {
+            return false;
+        }
+
+        bool found = false;
+        float bestScore = float.PositiveInfinity;
+        foreach (Room room in Room.List)
+        {
+            if (room == null || room.IsDestroyed)
+            {
+                continue;
+            }
+
+            float verticalDelta = Mathf.Abs(room.Position.y - position.y);
+            if (verticalDelta > 30f)
+            {
+                continue;
+            }
+
+            float horizontalDelta = Vector2.Distance(
+                new Vector2(room.Position.x, room.Position.z),
+                new Vector2(position.x, position.z));
+            float score = horizontalDelta + (verticalDelta * 4f);
+            if (score >= bestScore)
+            {
+                continue;
+            }
+
+            found = true;
+            bestScore = score;
+            zone = room.Zone;
+        }
+
+        return found && zone != FacilityZone.None;
     }
 
     private void TryReloadBot(Player bot, ManagedBotState state, FirearmItem firearm)
@@ -694,6 +986,8 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
 
         state.LastReloadAttemptTick = nowTick;
+        ReleaseZoomHold(bot, state, "reload");
+
         bool triggered = false;
         if (firearm.CanReload && !firearm.IsReloadingOrUnloading)
         {
@@ -708,7 +1002,157 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         LogBotEvent(state, $"reload-attempt triggered={triggered} item={firearm.Type} loaded={GetLoadedAmmo(firearm)} reserve={bot.GetAmmo(firearm.AmmoType)}");
     }
 
-    private void ApplyLoadout(Player player, LoadoutDefinition loadout)
+    private Player? ResolveEngagementTarget(ManagedBotState state)
+    {
+        return state.Engagement.TargetPlayerId >= 0
+            && Player.TryGet(state.Engagement.TargetPlayerId, out Player target)
+            && !target.IsDestroyed
+            && target.Role != RoleTypeId.Spectator
+            ? target
+            : null;
+    }
+
+    private void TriggerReloadEvasiveStrafe(Player bot, ManagedBotState state, Player? target)
+    {
+        int nowTick = Environment.TickCount;
+        int preferredDirection = ChooseReloadStrafeDirection(bot, target);
+        state.StrafeDirection = preferredDirection;
+        string[] primaryActions = preferredDirection >= 0
+            ? Config.BotBehavior.WalkRightActionNames
+            : Config.BotBehavior.WalkLeftActionNames;
+        string[] fallbackActions = preferredDirection >= 0
+            ? Config.BotBehavior.WalkLeftActionNames
+            : Config.BotBehavior.WalkRightActionNames;
+
+        bool moved = TryInvokeDummyAction(bot, primaryActions);
+        if (!moved)
+        {
+            moved = TryInvokeDummyAction(bot, fallbackActions);
+        }
+
+        LogBotEvent(
+            state,
+            $"reload-evasive-strafe moved={moved} direction={(preferredDirection >= 0 ? "right" : "left")} target={target?.Nickname ?? "none"}");
+    }
+
+    private int ChooseReloadStrafeDirection(Player bot, Player? target)
+    {
+        if (target == null)
+        {
+            return _random.Next(0, 2) == 0 ? -1 : 1;
+        }
+
+        float movementYaw = NormalizeSignedAngle(bot.LookRotation.y);
+        Quaternion yawRotation = Quaternion.Euler(0f, movementYaw, 0f);
+        Vector3 right = yawRotation * Vector3.right;
+        Vector3 targetAimPoint = target.Camera != null
+            ? target.Camera.position
+            : target.Position + Vector3.up * Config.BotBehavior.TargetAimHeightOffset;
+
+        bool leftExitsLos = !WouldHaveLineOfFireFrom(bot, bot.Position - right * 1.75f, target, targetAimPoint);
+        bool rightExitsLos = !WouldHaveLineOfFireFrom(bot, bot.Position + right * 1.75f, target, targetAimPoint);
+        if (leftExitsLos != rightExitsLos)
+        {
+            return rightExitsLos ? 1 : -1;
+        }
+
+        Vector3 toTarget = target.Position - bot.Position;
+        toTarget.y = 0f;
+        if (toTarget.sqrMagnitude > 0.0001f)
+        {
+            return Vector3.Dot(toTarget.normalized, right) >= 0f ? -1 : 1;
+        }
+
+        return _random.Next(0, 2) == 0 ? -1 : 1;
+    }
+
+    private bool WouldHaveLineOfFireFrom(Player bot, Vector3 projectedPosition, Player target, Vector3 targetAimPoint)
+    {
+        Vector3 origin = projectedPosition + Vector3.up * Config.BotBehavior.TargetAimHeightOffset;
+        Vector3 direction = targetAimPoint - origin;
+        float distance = direction.magnitude;
+        if (distance < 0.01f)
+        {
+            return true;
+        }
+
+        RaycastHit[] hits = Physics.RaycastAll(origin, direction.normalized, distance, ~0, QueryTriggerInteraction.Ignore);
+        Array.Sort(hits, (left, right) => left.distance.CompareTo(right.distance));
+        Transform botRoot = bot.ReferenceHub.transform;
+        Transform targetRoot = target.ReferenceHub.transform;
+        bool sawBlockingCandidate = false;
+
+        foreach (RaycastHit hit in hits)
+        {
+            Transform hitTransform = hit.transform;
+            if (hitTransform == null)
+            {
+                continue;
+            }
+
+            if (hitTransform == botRoot || hitTransform.IsChildOf(botRoot))
+            {
+                continue;
+            }
+
+            sawBlockingCandidate = true;
+            if (hitTransform == targetRoot || hitTransform.IsChildOf(targetRoot))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        return !sawBlockingCandidate;
+    }
+
+    private void TriggerReactiveStrafe(Player bot, ManagedBotState state, Player attacker)
+    {
+        int nowTick = Environment.TickCount;
+        if (unchecked(state.ReactiveStrafeCooldownUntilTick - nowTick) > 0)
+        {
+            return;
+        }
+
+        state.ReactiveStrafeUntilTick = nowTick + BotControllerService.GetReactiveStrafeDurationMs(Config.BotBehavior);
+        state.ReactiveStrafeCooldownUntilTick = nowTick + Math.Max(0, Config.BotBehavior.ReactiveStrafeCooldownMs);
+        state.NextStrafeFlipTick = 0;
+        state.TargetSwitchLockUntilTick = 0;
+
+        Vector3 lastKnownAimPoint = attacker.Camera != null
+            ? attacker.Camera.position
+            : attacker.Position + Vector3.up * Config.BotBehavior.TargetAimHeightOffset;
+        state.Engagement.LastKnownAimPoint = lastKnownAimPoint;
+
+        Vector3 toAttacker = attacker.Position - bot.Position;
+        toAttacker.y = 0f;
+        if (toAttacker.sqrMagnitude > 0.0001f)
+        {
+            float movementYaw = NormalizeSignedAngle(bot.LookRotation.y);
+            Quaternion yawRotation = Quaternion.Euler(0f, movementYaw, 0f);
+            Vector3 right = yawRotation * Vector3.right;
+            state.StrafeDirection = Vector3.Dot(toAttacker.normalized, right) >= 0f ? -1 : 1;
+        }
+        else
+        {
+            state.StrafeDirection = _random.Next(0, 2) == 0 ? -1 : 1;
+        }
+
+        string[] primaryActions = state.StrafeDirection >= 0
+            ? Config.BotBehavior.WalkRightActionNames
+            : Config.BotBehavior.WalkLeftActionNames;
+        string[] fallbackActions = state.StrafeDirection >= 0
+            ? Config.BotBehavior.WalkLeftActionNames
+            : Config.BotBehavior.WalkRightActionNames;
+
+        if (!TryInvokeDummyAction(bot, primaryActions))
+        {
+            TryInvokeDummyAction(bot, fallbackActions);
+        }
+    }
+
+    private void ApplyLoadout(Player player, LoadoutDefinition loadout, bool isBot)
     {
         if (loadout.ClearInventory)
         {
@@ -717,12 +1161,14 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
 
         FirearmItem? primaryFirearm = null;
+        List<FirearmItem> loadoutFirearms = new();
         foreach (ItemType itemType in loadout.Items ?? Array.Empty<ItemType>())
         {
             Item item = player.AddItem(itemType, ItemAddReason.AdminCommand);
-            if (primaryFirearm == null && item is FirearmItem firearm)
+            if (item is FirearmItem firearm)
             {
-                primaryFirearm = firearm;
+                loadoutFirearms.Add(firearm);
+                primaryFirearm ??= firearm;
             }
         }
 
@@ -736,12 +1182,160 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             player.CurrentItem = primaryFirearm;
         }
 
+        if (ShouldRandomizeFirearmAttachments(loadout, isBot))
+        {
+            foreach (FirearmItem firearm in loadoutFirearms)
+            {
+                RandomizeFirearmAttachments(player, firearm, "loadout");
+            }
+        }
+
         if (loadout.RefillActiveFirearmOnSpawn)
         {
             RefillFirearm(primaryFirearm);
         }
 
         MaintainReserveAmmo(player, primaryFirearm);
+    }
+
+    private bool ShouldRandomizeFirearmAttachments(LoadoutDefinition loadout, bool isBot)
+    {
+        if (!Config.RandomizeFirearmAttachments
+            || !loadout.RandomizeFirearmAttachmentsOnSpawn)
+        {
+            return false;
+        }
+
+        return Config.FirearmAttachmentRandomizationMode switch
+        {
+            FirearmAttachmentRandomizationMode.BotsOnly => isBot,
+            FirearmAttachmentRandomizationMode.AllLoadouts => true,
+            _ => isBot,
+        };
+    }
+
+    private void ScheduleBotAttachmentRandomizationChecks(int playerId, int brainToken, int generation)
+    {
+        foreach (int delayMs in BotAttachmentRandomizationDelaysMs)
+        {
+            Schedule(() =>
+            {
+                if (!IsCurrentGeneration(generation)
+                    || !_managedBots.TryGetValue(playerId, out ManagedBotState latest)
+                    || latest.BrainToken != brainToken
+                    || !Player.TryGet(playerId, out Player liveBot)
+                    || liveBot.IsDestroyed
+                    || liveBot.Role == RoleTypeId.Spectator)
+                {
+                    return;
+                }
+
+                EnsureFirearmEquipped(liveBot);
+                RandomizeBotInventoryFirearmAttachments(liveBot, $"delayed-{delayMs}ms");
+            }, delayMs);
+        }
+    }
+
+    private void RandomizeBotInventoryFirearmAttachments(Player player, string phase)
+    {
+        if (!Config.RandomizeFirearmAttachments
+            || (Config.FirearmAttachmentRandomizationMode != FirearmAttachmentRandomizationMode.BotsOnly
+                && Config.FirearmAttachmentRandomizationMode != FirearmAttachmentRandomizationMode.AllLoadouts))
+        {
+            LogAttachment($"skip phase={phase} player={FormatPlayer(player)} reason=config global={Config.RandomizeFirearmAttachments} mode={Config.FirearmAttachmentRandomizationMode}");
+            return;
+        }
+
+        FirearmItem[] firearms = player.Items.OfType<FirearmItem>().ToArray();
+        LogAttachment(
+            $"scan phase={phase} player={FormatPlayer(player)} role={player.Role} current={player.CurrentItem?.Type.ToString() ?? "none"} " +
+            $"items=[{string.Join(",", player.Items.Select(item => item.Type))}] firearms=[{string.Join(",", firearms.Select(firearm => $"{firearm.Type}#{firearm.Serial} code={firearm.AttachmentsCode} active={FormatActiveAttachments(firearm)}"))}]");
+
+        if (firearms.Length == 0)
+        {
+            LogAttachment($"skip phase={phase} player={FormatPlayer(player)} reason=no-firearms");
+            return;
+        }
+
+        foreach (FirearmItem firearm in firearms)
+        {
+            RandomizeFirearmAttachments(player, firearm, phase);
+        }
+    }
+
+    private void RandomizeFirearmAttachments(Player owner, FirearmItem firearm, string phase)
+    {
+        try
+        {
+            uint randomCode = GetRandomAttachmentCode(firearm);
+            uint validatedCode = firearm.ValidateAttachmentsCode(randomCode);
+            uint beforeCode = firearm.AttachmentsCode;
+            string beforeActive = FormatActiveAttachments(firearm);
+            ApplyFirearmAttachmentPreference(owner, firearm.Type, validatedCode);
+            firearm.AttachmentsCode = validatedCode;
+            AttachmentsUtils.ApplyAttachmentsCode(firearm.Base, validatedCode, true);
+            AttachmentCodeSync.ServerSetCode(firearm.Serial, validatedCode);
+            LogAttachment(
+                $"apply phase={phase} player={FormatPlayer(owner)} weapon={firearm.Type} serial={firearm.Serial} " +
+                $"beforeCode={beforeCode} randomCode={randomCode} validatedCode={validatedCode} " +
+                $"before=[{beforeActive}] after=[{FormatActiveAttachments(firearm)}] " +
+                $"preferenceMethod={(AttachmentsServerApplyPreferenceMethod == null ? "missing" : "ok")}");
+        }
+        catch (Exception ex)
+        {
+            ApiLogger.Warn($"[{Name}] [AttachmentDebug] fail phase={phase} player={FormatPlayer(owner)} weapon={firearm.Type} serial={firearm.Serial}: {ex}");
+        }
+    }
+
+    private static void ApplyFirearmAttachmentPreference(Player owner, ItemType firearmType, uint attachmentsCode)
+    {
+        AttachmentsServerApplyPreferenceMethod?.Invoke(null, new object[] { owner.ReferenceHub, firearmType, attachmentsCode });
+    }
+
+    private void LogAttachment(string message)
+    {
+        if (Config.EnableAttachmentLogging)
+        {
+            ApiLogger.Info($"[{Name}] [AttachmentDebug] {message}");
+        }
+    }
+
+    private static string FormatPlayer(Player player)
+    {
+        return $"{player.Nickname}#{player.PlayerId}";
+    }
+
+    private static string FormatActiveAttachments(FirearmItem firearm)
+    {
+        try
+        {
+            string[] active = firearm.ActiveAttachments
+                .Select(attachment => attachment.Name.ToString())
+                .ToArray();
+            return active.Length == 0 ? "none" : string.Join("+", active);
+        }
+        catch (Exception ex)
+        {
+            return $"error:{ex.GetType().Name}";
+        }
+    }
+
+    private uint GetRandomAttachmentCode(FirearmItem firearm)
+    {
+        AttachmentName[] selectedAttachments = firearm.Attachments
+            .Where(attachment => attachment != null && attachment.Slot != AttachmentSlot.Unassigned)
+            .GroupBy(attachment => attachment.Slot)
+            .Select(group =>
+            {
+                var choices = group.ToArray();
+                return choices[_random.Next(choices.Length)].Name;
+            })
+            .Where(name => name != AttachmentName.None)
+            .ToArray();
+
+        return selectedAttachments.Length == 0
+            ? AttachmentsUtils.GetRandomAttachmentsCode(firearm.Type)
+            : firearm.ValidateAttachmentsCode(selectedAttachments);
     }
 
     private NamedLoadoutDefinition? GetSelectedHumanPreset(Player player)
@@ -767,6 +1361,50 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private NamedLoadoutDefinition? FindHumanLoadoutPreset(string selector)
     {
         return _humanPresetService.FindPreset(Config, selector);
+    }
+
+    private static Player? FindNearestHostile(Player bot)
+    {
+        Player? nearest = null;
+        float nearestDistance = float.MaxValue;
+        foreach (Player candidate in Player.List)
+        {
+            if (!AreCombatantsHostile(bot, candidate))
+            {
+                continue;
+            }
+
+            float distance = Vector3.Distance(bot.Position, candidate.Position);
+            if (distance < nearestDistance)
+            {
+                nearestDistance = distance;
+                nearest = candidate;
+            }
+        }
+
+        return nearest;
+    }
+
+    private static bool AreCombatantsHostile(Player bot, Player candidate)
+    {
+        if (candidate.PlayerId == bot.PlayerId
+            || !BotTargetingService.IsCombatTarget(candidate)
+            || !BotTargetingService.IsCombatTarget(bot))
+        {
+            return false;
+        }
+
+        if (bot.Team == Team.SCPs)
+        {
+            return candidate.Team != Team.SCPs;
+        }
+
+        if (candidate.Team == Team.SCPs)
+        {
+            return true;
+        }
+
+        return candidate.Team != bot.Team;
     }
 
     private void ShowLoadoutMenuHint(Player player, float duration)
@@ -815,7 +1453,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             }
             else if (preset.Loadout != null)
             {
-                ApplyLoadout(player, preset.Loadout);
+                ApplyLoadout(player, preset.Loadout, isBot: false);
                 RestoreVitals(player);
                 FirearmItem? firearm = player.CurrentItem as FirearmItem ?? player.Items.OfType<FirearmItem>().FirstOrDefault();
                 response += firearm == null
@@ -860,180 +1498,53 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             return;
         }
 
-        LoadoutDefinition? loadout = IsManagedBot(player) ? Config.BotLoadout : GetHumanLoadout(player);
-        if (loadout == null)
+        LoadoutDefinition? loadout = null;
+        if (IsManagedBot(player))
+        {
+            _managedBots.TryGetValue(player.PlayerId, out ManagedBotState? state);
+            loadout = GetBotLoadout(player, state);
+        }
+        else
+        {
+            loadout = GetHumanLoadout(player);
+        }
+
+        if (loadout != null && !loadout.InfiniteReserveAmmo)
         {
             return;
         }
 
-        if (!loadout.InfiniteReserveAmmo)
+        ushort targetReserve = loadout == null
+            ? DefaultReserveAmmoTarget
+            : GetReserveAmmoTarget(loadout, firearm.AmmoType);
+        if (targetReserve == 0)
         {
-            return;
+            targetReserve = DefaultReserveAmmoTarget;
         }
 
-        ushort targetReserve = GetReserveAmmoTarget(loadout, firearm.AmmoType);
         if (targetReserve > 0 && player.GetAmmo(firearm.AmmoType) < targetReserve)
         {
             player.SetAmmo(firearm.AmmoType, targetReserve);
         }
     }
 
+    private LoadoutDefinition? GetBotLoadout(Player player, ManagedBotState? state)
+    {
+        RoleTypeId role = state?.RespawnRole ?? player.Role;
+        if (role == RoleTypeId.None || role == RoleTypeId.Spectator)
+        {
+            role = Config.BotRole;
+        }
+
+        // Keep the configured sandbox loadout for the default bot role, but let
+        // manually switched roles keep their native role gear.
+        return role == Config.BotRole ? Config.BotLoadout : null;
+    }
+
     private static void RestoreVitals(Player player)
     {
         player.Health = player.MaxHealth;
         player.ArtificialHealth = 0f;
-    }
-
-    private void UpdateStuckState(Player bot, ManagedBotState state)
-    {
-        Vector3 current = bot.Position;
-        Vector3 previous = state.LastPosition;
-        current.y = 0f;
-        previous.y = 0f;
-
-        float movedDistance = Vector3.Distance(current, previous);
-        if (movedDistance < Config.BotBehavior.StuckDistanceThreshold)
-        {
-            state.StuckTicks++;
-        }
-        else
-        {
-            state.StuckTicks = 0;
-        }
-
-        state.LastPosition = bot.Position;
-    }
-
-    private bool MoveBot(Player bot, ManagedBotState state, Player target)
-    {
-        if (!Config.BotBehavior.EnableStepMovement)
-        {
-            return false;
-        }
-
-        int nowTick = Environment.TickCount;
-        if (state.StuckTicks >= Config.BotBehavior.StuckTickThreshold)
-        {
-            state.UnstuckUntilTick = nowTick + Config.BotBehavior.UnstuckDurationMs;
-            state.StuckTicks = 0;
-            state.StrafeDirection = Next(0, 2) == 0 ? -1 : 1;
-        }
-
-        Vector3 toTarget = target.Position - bot.Position;
-        toTarget.y = 0f;
-        float distance = toTarget.magnitude;
-        bool crowded = IsCrowded(bot);
-        if (nowTick < state.UnstuckUntilTick || (crowded && distance <= Config.BotBehavior.PreferredRange + Config.BotBehavior.RangeTolerance))
-        {
-            return TryUnstuckMove(bot, state);
-        }
-
-        if (Next(0, 100) < Config.BotBehavior.StrafeDirectionChangeChancePercent)
-        {
-            state.StrafeDirection *= -1;
-        }
-
-        if (state.ConsecutiveLinearMoves >= Config.BotBehavior.LinearMoveTickThreshold
-            && Next(0, 100) < Config.BotBehavior.RandomStrafeAfterLinearChancePercent)
-        {
-            state.ConsecutiveLinearMoves = 0;
-            return TryStrafeMove(bot, state);
-        }
-
-        if (distance > Config.BotBehavior.PreferredRange + Config.BotBehavior.RangeTolerance)
-        {
-            bool moved = TryInvokeDummyAction(bot, Config.BotBehavior.WalkForwardActionNames);
-            if (!moved)
-            {
-                moved = TryStrafeMove(bot, state);
-            }
-
-            state.ConsecutiveLinearMoves = moved ? state.ConsecutiveLinearMoves + 1 : 0;
-            return moved;
-        }
-
-        if (distance < Config.BotBehavior.PreferredRange - Config.BotBehavior.RangeTolerance)
-        {
-            bool moved = TryInvokeDummyAction(bot, Config.BotBehavior.WalkBackwardActionNames);
-            if (!moved)
-            {
-                moved = TryStrafeMove(bot, state);
-            }
-
-            state.ConsecutiveLinearMoves = moved ? state.ConsecutiveLinearMoves + 1 : 0;
-            return moved;
-        }
-
-        state.ConsecutiveLinearMoves = 0;
-        return TryStrafeMove(bot, state);
-    }
-
-    private bool TryUnstuckMove(Player bot, ManagedBotState state)
-    {
-        int roll = Next(0, 100);
-        state.StrafeDirection = Next(0, 2) == 0 ? -1 : 1;
-
-        if (roll < 45)
-        {
-            return TryStrafeMove(bot, state)
-                || TryInvokeDummyAction(bot, Config.BotBehavior.WalkBackwardActionNames)
-                || TryInvokeDummyAction(bot, Config.BotBehavior.WalkForwardActionNames);
-        }
-
-        if (roll < 80)
-        {
-            return TryInvokeDummyAction(bot, Config.BotBehavior.WalkBackwardActionNames)
-                || TryStrafeMove(bot, state)
-                || TryInvokeDummyAction(bot, Config.BotBehavior.WalkForwardActionNames);
-        }
-
-        return TryInvokeDummyAction(bot, Config.BotBehavior.WalkForwardActionNames)
-            || TryStrafeMove(bot, state)
-            || TryInvokeDummyAction(bot, Config.BotBehavior.WalkBackwardActionNames);
-    }
-
-    private bool TryStrafeMove(Player bot, ManagedBotState state)
-    {
-        if (Next(0, 100) < Config.BotBehavior.StrafeDirectionChangeChancePercent)
-        {
-            state.StrafeDirection *= -1;
-        }
-
-        string[] actionNames = state.StrafeDirection >= 0
-            ? Config.BotBehavior.WalkRightActionNames
-            : Config.BotBehavior.WalkLeftActionNames;
-
-        bool moved = TryInvokeDummyAction(bot, actionNames);
-        if (!moved)
-        {
-            string[] opposite = state.StrafeDirection >= 0
-                ? Config.BotBehavior.WalkLeftActionNames
-                : Config.BotBehavior.WalkRightActionNames;
-            moved = TryInvokeDummyAction(bot, opposite);
-        }
-
-        return moved;
-    }
-
-    private bool IsCrowded(Player bot)
-    {
-        float radiusSqr = Config.BotBehavior.NearbyBotAvoidanceRadius * Config.BotBehavior.NearbyBotAvoidanceRadius;
-        foreach (Player other in Player.List)
-        {
-            if (other.PlayerId == bot.PlayerId || !IsManagedBot(other) || other.IsDestroyed || other.Role == RoleTypeId.Spectator)
-            {
-                continue;
-            }
-
-            Vector3 offset = other.Position - bot.Position;
-            offset.y = 0f;
-            if (offset.sqrMagnitude <= radiusSqr)
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private Player? FindNearestHuman(Vector3 origin)
@@ -1262,10 +1773,152 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
     }
 
+    private readonly struct GroupedDummyActionEntry
+    {
+        public GroupedDummyActionEntry(string category, DummyAction action)
+        {
+            Category = category;
+            Action = action;
+        }
+
+        public string Category { get; }
+
+        public DummyAction Action { get; }
+    }
+
+    private GroupedDummyActionEntry[] GetGroupedDummyActions(Player bot)
+    {
+        if (DummyActionCollectorGetCacheMethod == null
+            || DummyActionProvidersField == null
+            || RootDummyPopulateActionsMethod == null)
+        {
+            return Array.Empty<GroupedDummyActionEntry>();
+        }
+
+        try
+        {
+            object? cache = DummyActionCollectorGetCacheMethod.Invoke(null, new object[] { bot.ReferenceHub });
+            if (cache == null)
+            {
+                return Array.Empty<GroupedDummyActionEntry>();
+            }
+
+            DummyActionCacheUpdateMethod?.Invoke(cache, Array.Empty<object>());
+            object? providers = DummyActionProvidersField.GetValue(cache);
+            if (providers is not Array providerArray || providerArray.Length == 0)
+            {
+                return Array.Empty<GroupedDummyActionEntry>();
+            }
+
+            List<GroupedDummyActionEntry> actions = new();
+            foreach (object? provider in providerArray)
+            {
+                if (provider == null)
+                {
+                    continue;
+                }
+
+                string currentCategory = string.Empty;
+                Action<DummyAction> addAction = action =>
+                {
+                    if (!string.IsNullOrWhiteSpace(action.Name) && action.Action != null)
+                    {
+                        actions.Add(new GroupedDummyActionEntry(currentCategory, action));
+                    }
+                };
+
+                Action<string> addCategory = category =>
+                {
+                    currentCategory = category?.Trim() ?? string.Empty;
+                };
+
+                RootDummyPopulateActionsMethod.Invoke(provider, new object[] { addAction, addCategory });
+            }
+
+            return actions.ToArray();
+        }
+        catch
+        {
+            return Array.Empty<GroupedDummyActionEntry>();
+        }
+    }
+
+    private static bool IsItemScopedActionName(string actionName)
+    {
+        if (string.IsNullOrWhiteSpace(actionName))
+        {
+            return false;
+        }
+
+        return actionName.IndexOf("shoot", StringComparison.OrdinalIgnoreCase) >= 0
+            || actionName.IndexOf("reload", StringComparison.OrdinalIgnoreCase) >= 0
+            || actionName.IndexOf("zoom", StringComparison.OrdinalIgnoreCase) >= 0
+            || actionName.IndexOf("inspect", StringComparison.OrdinalIgnoreCase) >= 0
+            || actionName.IndexOf("holster", StringComparison.OrdinalIgnoreCase) >= 0
+            || actionName.IndexOf("drop", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    private static string GetCurrentItemModulePrefix(Player bot)
+    {
+        return bot.CurrentItem?.Type.ToString() ?? string.Empty;
+    }
+
+    private static int ScoreDummyActionCategory(string category, string itemModulePrefix)
+    {
+        if (string.IsNullOrWhiteSpace(itemModulePrefix))
+        {
+            return string.IsNullOrWhiteSpace(category) ? 10 : 0;
+        }
+
+        if (category.StartsWith(itemModulePrefix + " (#", StringComparison.OrdinalIgnoreCase))
+        {
+            return 500;
+        }
+
+        string anyCategory = $"{itemModulePrefix} (ANY)";
+        if (string.Equals(category, anyCategory, StringComparison.OrdinalIgnoreCase))
+        {
+            return 400;
+        }
+
+        if (category.StartsWith(itemModulePrefix + " (", StringComparison.OrdinalIgnoreCase))
+        {
+            return 300;
+        }
+
+        if (string.Equals(category, itemModulePrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return 200;
+        }
+
+        if (category.IndexOf(itemModulePrefix, StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            return 100;
+        }
+
+        return string.IsNullOrWhiteSpace(category) ? 100 : 0;
+    }
+
+    private string[] GetAvailableShootModuleCatalog(Player bot)
+    {
+        return GetGroupedDummyActions(bot)
+            .Where(entry => entry.Action.Name.IndexOf("shoot", StringComparison.OrdinalIgnoreCase) >= 0)
+            .GroupBy(entry => string.IsNullOrWhiteSpace(entry.Category) ? "<uncategorized>" : entry.Category, StringComparer.OrdinalIgnoreCase)
+            .Select(group => $"{group.Key}:[{string.Join(",", group.Select(entry => entry.Action.Name).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(name => name))}]")
+            .OrderBy(text => text, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
     private bool TryResolveDummyAction(Player bot, string actionName, out DummyAction action, out string resolvedActionName)
+    {
+        return TryResolveDummyAction(bot, actionName, out action, out resolvedActionName, out _);
+    }
+
+    private bool TryResolveDummyAction(Player bot, string actionName, out DummyAction action, out string resolvedActionName, out string resolvedCategory)
     {
         action = default;
         resolvedActionName = string.Empty;
+        resolvedCategory = string.Empty;
         if (string.IsNullOrWhiteSpace(actionName))
         {
             return false;
@@ -1273,6 +1926,31 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
         try
         {
+            if (IsItemScopedActionName(actionName))
+            {
+                string itemModulePrefix = GetCurrentItemModulePrefix(bot);
+                GroupedDummyActionEntry[] groupedActions = GetGroupedDummyActions(bot);
+                if (groupedActions.Length > 0)
+                {
+                    foreach (string variant in GetActionNameVariants(actionName))
+                    {
+                        GroupedDummyActionEntry groupedMatch = groupedActions
+                            .Where(candidate => string.Equals(candidate.Action.Name, variant, StringComparison.OrdinalIgnoreCase))
+                            .OrderByDescending(candidate => ScoreDummyActionCategory(candidate.Category, itemModulePrefix))
+                            .ThenBy(candidate => candidate.Category, StringComparer.OrdinalIgnoreCase)
+                            .FirstOrDefault();
+
+                        if (!string.IsNullOrWhiteSpace(groupedMatch.Action.Name) && groupedMatch.Action.Action != null)
+                        {
+                            action = groupedMatch.Action;
+                            resolvedActionName = groupedMatch.Action.Name;
+                            resolvedCategory = groupedMatch.Category;
+                            return true;
+                        }
+                    }
+                }
+            }
+
             DummyAction[] actions = DummyActionCollector
                 .ServerGetActions(bot.ReferenceHub)
                 .Where(candidate => !string.IsNullOrWhiteSpace(candidate.Name) && candidate.Action != null)
@@ -1342,11 +2020,17 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     private bool TryInvokeDummyAction(Player bot, string actionName, out string resolvedActionName)
     {
+        return TryInvokeDummyAction(bot, actionName, out resolvedActionName, out _);
+    }
+
+    private bool TryInvokeDummyAction(Player bot, string actionName, out string resolvedActionName, out string resolvedCategory)
+    {
         resolvedActionName = string.Empty;
+        resolvedCategory = string.Empty;
 
         try
         {
-            if (!TryResolveDummyAction(bot, actionName, out DummyAction action, out resolvedActionName))
+            if (!TryResolveDummyAction(bot, actionName, out DummyAction action, out resolvedActionName, out resolvedCategory))
             {
                 return false;
             }
@@ -1369,38 +2053,39 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         int reserveAmmo = firearm == null ? -1 : bot.GetAmmo(firearm.AmmoType);
         string itemName = bot.CurrentItem?.Type.ToString() ?? "none";
         string targetName = $"{target.Nickname}#{target.PlayerId}";
+        bool campBoost = state.AiState == BotAiState.Camp;
+        int minShotIntervalMs = campBoost
+            ? Math.Max(1, Config.BotBehavior.MinShotIntervalMs / 2)
+            : Config.BotBehavior.MinShotIntervalMs;
 
-        if (unchecked(nowTick - state.LastShotTick) < Config.BotBehavior.MinShotIntervalMs)
+        if (unchecked(nowTick - state.LastShotTick) < minShotIntervalMs)
         {
-            LogBotDebug(state, $"shot-skip cooldown target={targetName} item={itemName} loaded={loadedAmmo} reserve={reserveAmmo}");
+            LogBotShot(state, $"shot-skip cooldown target={targetName} item={itemName} loaded={loadedAmmo} reserve={reserveAmmo}");
             return;
         }
 
         state.LastShotTick = nowTick;
 
-        if (Config.BotBehavior.UseZoomWhileShooting)
-        {
-            TryInvokeDummyAction(bot, Config.BotBehavior.ZoomActionName);
-        }
-
         string[] shootCandidates = GetShootActionCandidates(bot, state);
         bool fired = false;
         string actionUsed = "";
+        string actionModule = "";
         foreach (string candidate in shootCandidates)
         {
-            if (!TryInvokeDummyAction(bot, candidate, out string resolvedCandidate))
+            if (!TryInvokeDummyAction(bot, candidate, out string resolvedCandidate, out string resolvedCategory))
             {
                 continue;
             }
 
             fired = true;
             actionUsed = string.IsNullOrWhiteSpace(resolvedCandidate) ? candidate : resolvedCandidate;
+            actionModule = string.IsNullOrWhiteSpace(resolvedCategory) ? "<flat>" : resolvedCategory;
             break;
         }
 
         if (!fired)
         {
-            LogBotDebug(
+            LogBotShot(
                 state,
                 $"shot-fail candidates=[{string.Join(",", shootCandidates)}] release={Config.BotBehavior.ShootReleaseActionName} target={targetName} item={itemName} loaded={loadedAmmo} reserve={reserveAmmo}");
             return;
@@ -1409,9 +2094,10 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         state.PendingShotVerificationTick = nowTick;
         state.PendingShotLoadedAmmo = loadedAmmo;
         state.LastShotActionName = actionUsed;
-        LogBotDebug(
+        state.LastShotModuleName = actionModule;
+        LogBotShot(
             state,
-            $"shot-ok action={actionUsed} release={Config.BotBehavior.ShootReleaseActionName} target={targetName} item={itemName} loaded={loadedAmmo} reserve={reserveAmmo}");
+            $"shot-ok action={actionUsed} module={actionModule} release={Config.BotBehavior.ShootReleaseActionName} target={targetName} item={itemName} loaded={loadedAmmo} reserve={reserveAmmo}");
         SchedulePostShotVerification(bot.PlayerId, brainToken, generation);
 
         bool shouldReleaseShoot = actionUsed.IndexOf("hold", StringComparison.OrdinalIgnoreCase) >= 0
@@ -1419,6 +2105,9 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         if (shouldReleaseShoot && !string.IsNullOrWhiteSpace(Config.BotBehavior.ShootReleaseActionName))
         {
             int releaseToken = brainToken;
+            int shootReleaseDelayMs = campBoost
+                ? Math.Max(1, Config.BotBehavior.ShootReleaseDelayMs / 2)
+                : Config.BotBehavior.ShootReleaseDelayMs;
             Schedule(() =>
             {
                 if (IsCurrentGeneration(generation)
@@ -1427,10 +2116,147 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                     && Player.TryGet(bot.PlayerId, out Player liveBot))
                 {
                     bool released = TryInvokeDummyAction(liveBot, Config.BotBehavior.ShootReleaseActionName, out string resolvedReleaseAction);
-                    LogBotDebug(latest, $"shot-release action={(string.IsNullOrWhiteSpace(resolvedReleaseAction) ? Config.BotBehavior.ShootReleaseActionName : resolvedReleaseAction)} released={released}");
+                    LogBotShot(latest, $"shot-release action={(string.IsNullOrWhiteSpace(resolvedReleaseAction) ? Config.BotBehavior.ShootReleaseActionName : resolvedReleaseAction)} released={released}");
                 }
-            }, Config.BotBehavior.ShootReleaseDelayMs);
+            }, shootReleaseDelayMs);
         }
+
+    }
+
+    private void UpdateZoomHold(Player bot, ManagedBotState state, BotTargetSelection? target)
+    {
+        if (target == null)
+        {
+            ReleaseZoomHold(bot, state, "no-target");
+            return;
+        }
+
+        if (!target.HasLineOfSight)
+        {
+            ReleaseZoomHold(bot, state, $"no-los target={target.Target.Nickname}#{target.Target.PlayerId}");
+            return;
+        }
+
+        bool shouldZoom = ShouldZoomForTarget(bot, target.Target, out float distance, out float threshold, out string reason);
+        if (state.ZoomHeld)
+        {
+            if (!shouldZoom)
+            {
+                ReleaseZoomHold(bot, state, $"target-{reason} target={target.Target.Nickname}#{target.Target.PlayerId} distance={distance:F1} threshold={threshold:F1}");
+                return;
+            }
+
+            state.ZoomHeldTargetPlayerId = target.Target.PlayerId;
+            LogBotZoomThrottled(state, $"held target={target.Target.Nickname}#{target.Target.PlayerId} los=True distance={distance:F1} threshold={threshold:F1}");
+            return;
+        }
+
+        if (!shouldZoom)
+        {
+            LogBotZoomThrottled(
+                state,
+                $"skip reason={reason} target={target.Target.Nickname}#{target.Target.PlayerId} distance={distance:F1} threshold={threshold:F1} held=False");
+            return;
+        }
+
+        bool invoked = TryInvokeFirstDummyAction(bot, GetZoomActionCandidates(bot), out string actionUsed);
+        state.ZoomHeld = invoked;
+        state.ZoomHeldTargetPlayerId = invoked ? target.Target.PlayerId : -1;
+        LogBotZoom(
+            state,
+            $"hold reason={reason} target={target.Target.Nickname}#{target.Target.PlayerId} distance={distance:F1} threshold={threshold:F1} " +
+            $"invoked={invoked} action={(string.IsNullOrWhiteSpace(actionUsed) ? "none" : actionUsed)} candidates=[{string.Join(",", GetZoomActionCandidates(bot))}]");
+    }
+
+    private void ReleaseZoomHold(Player bot, ManagedBotState state, string reason)
+    {
+        if (!state.ZoomHeld)
+        {
+            LogBotZoomThrottled(state, $"release-skip reason={reason} held=False");
+            return;
+        }
+
+        bool released = TryInvokeFirstDummyAction(bot, GetZoomReleaseActionCandidates(), out string resolvedReleaseAction);
+        LogBotZoom(
+            state,
+            $"release reason={reason} targetId={state.ZoomHeldTargetPlayerId} " +
+            $"action={(string.IsNullOrWhiteSpace(resolvedReleaseAction) ? Config.BotBehavior.ZoomReleaseActionName : resolvedReleaseAction)} released={released}");
+        state.ZoomHeld = false;
+        state.ZoomHeldTargetPlayerId = -1;
+    }
+
+    private bool ShouldZoomForTarget(Player bot, Player target, out float distance, out float threshold, out string reason)
+    {
+        distance = Vector3.Distance(bot.Position, target.Position);
+        threshold = Config.BotBehavior.FarTargetZoomDistance > 0f
+            ? Config.BotBehavior.FarTargetZoomDistance
+            : Config.BotBehavior.FarTargetAimDistance;
+        threshold = Mathf.Max(1f, threshold);
+
+        if (Config.BotBehavior.UseZoomWhileShooting)
+        {
+            reason = "always";
+            return true;
+        }
+
+        if (!Config.BotBehavior.UseZoomForFarTargets)
+        {
+            reason = "disabled";
+            return false;
+        }
+
+        reason = distance >= threshold ? "far-target" : "too-close";
+        return distance >= threshold;
+    }
+
+    private string[] GetZoomActionCandidates(Player bot)
+    {
+        List<string> candidates = new();
+
+        void AddCandidate(string actionName)
+        {
+            if (string.IsNullOrWhiteSpace(actionName)
+                || candidates.Contains(actionName, StringComparer.OrdinalIgnoreCase)
+                || !HasDummyAction(bot, actionName))
+            {
+                return;
+            }
+
+            candidates.Add(actionName);
+        }
+
+        AddCandidate("Zoom->Hold");
+        AddCandidate("Zoom.Hold");
+        if (Config.BotBehavior.ZoomActionName.IndexOf("hold", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            AddCandidate(Config.BotBehavior.ZoomActionName);
+        }
+
+        return candidates.ToArray();
+    }
+
+    private string[] GetZoomReleaseActionCandidates()
+    {
+        return new[]
+        {
+            Config.BotBehavior.ZoomReleaseActionName,
+            "Zoom->Release",
+            "Zoom.Release",
+        };
+    }
+
+    private bool TryInvokeFirstDummyAction(Player bot, IEnumerable<string> actionNames, out string resolvedActionName)
+    {
+        resolvedActionName = string.Empty;
+        foreach (string actionName in actionNames ?? Array.Empty<string>())
+        {
+            if (TryInvokeDummyAction(bot, actionName, out resolvedActionName))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private string[] GetShootActionCandidates(Player bot, ManagedBotState state)
@@ -1451,7 +2277,6 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
         AddCandidate(state.PreferredShootActionName);
         AddCandidate(Config.BotBehavior.ShootPressActionName);
-        AddCandidate(Config.BotBehavior.AlternateShootPressActionName);
         AddCandidate("Shoot.Click");
         AddCandidate("Shoot.Press");
         AddCandidate("Shoot");
@@ -1466,20 +2291,32 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             AddCandidate(actionName);
         }
 
+        AddCandidate(Config.BotBehavior.AlternateShootPressActionName);
+
         return candidates.ToArray();
     }
 
     private void CleanupManagedBots()
     {
-        foreach (int playerId in _managedBots.Keys.ToArray())
+        foreach (KeyValuePair<int, ManagedBotState> entry in _managedBots.ToArray())
         {
+            int playerId = entry.Key;
+            entry.Value.DestroyNavigationAgent();
+            DestroyNavAgentDebugToy(playerId);
             if (Player.TryGet(playerId, out Player bot) && bot.GameObject != null)
             {
+                FacilityNavAgentFollower? follower = bot.GameObject.GetComponent<FacilityNavAgentFollower>();
+                if (follower != null)
+                {
+                    UnityEngine.Object.Destroy(follower);
+                }
+
                 NetworkServer.Destroy(bot.GameObject);
             }
         }
 
         _managedBots.Clear();
+        ClearNavAgentDebugVisuals();
     }
 
     private void CleanupMissingBotEntries()
@@ -1488,9 +2325,30 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         {
             if (!Player.TryGet(playerId, out Player player) || player.IsDestroyed)
             {
-                _managedBots.Remove(playerId);
+                RemoveManagedBot(playerId);
             }
         }
+    }
+
+    private bool RemoveManagedBot(int playerId)
+    {
+        if (!_managedBots.TryGetValue(playerId, out ManagedBotState state))
+        {
+            return false;
+        }
+
+        state.DestroyNavigationAgent();
+        DestroyNavAgentDebugToy(playerId);
+        if (Player.TryGet(playerId, out Player bot) && bot.GameObject != null)
+        {
+            FacilityNavAgentFollower? follower = bot.GameObject.GetComponent<FacilityNavAgentFollower>();
+            if (follower != null)
+            {
+                UnityEngine.Object.Destroy(follower);
+            }
+        }
+
+        return _managedBots.Remove(playerId);
     }
 
     private bool IsCurrentGeneration(int generation)
@@ -1564,7 +2422,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
             LogBotEvent(
                 state,
-                $"post-shot-check item={itemName} action={state.LastShotActionName} loaded={currentLoadedAmmo} reserve={GetReserveAmmoSafe(bot, firearm)} ammoConsumed={ammoConsumed} shotEvent={shotEventObserved} dryFires={state.DryFireCount}");
+                $"post-shot-check item={itemName} action={state.LastShotActionName} module={state.LastShotModuleName} loaded={currentLoadedAmmo} reserve={GetReserveAmmoSafe(bot, firearm)} ammoConsumed={ammoConsumed} shotEvent={shotEventObserved} dryFires={state.DryFireCount}");
 
             if (!shotEventObserved && !ammoConsumed)
             {
@@ -1587,19 +2445,10 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         {
             state.LoggedShootActionCatalog = true;
             LogBotEvent(state, $"shoot-actions available=[{string.Join(",", GetAvailableShootActionNames(bot))}]");
+            LogBotEvent(state, $"shoot-modules available=[{string.Join(" | ", GetAvailableShootModuleCatalog(bot))}]");
         }
 
         string previous = state.LastShotActionName;
-        if (!string.IsNullOrWhiteSpace(Config.BotBehavior.AlternateShootPressActionName)
-            && !string.Equals(previous, Config.BotBehavior.AlternateShootPressActionName, StringComparison.OrdinalIgnoreCase)
-            && Config.BotBehavior.AlternateShootPressActionName.IndexOf("hold", StringComparison.OrdinalIgnoreCase) < 0
-            && HasDummyAction(bot, Config.BotBehavior.AlternateShootPressActionName))
-        {
-            state.PreferredShootActionName = Config.BotBehavior.AlternateShootPressActionName;
-            LogBotEvent(state, $"dry-fire-fallback previous={previous} next={state.PreferredShootActionName} count={state.DryFireCount}");
-            return;
-        }
-
         string? availableClickLike = GetAvailableShootActionNames(bot)
             .FirstOrDefault(name =>
                 !string.Equals(name, previous, StringComparison.OrdinalIgnoreCase)
@@ -1612,12 +2461,21 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             return;
         }
 
+        if (!string.IsNullOrWhiteSpace(Config.BotBehavior.AlternateShootPressActionName)
+            && !string.Equals(previous, Config.BotBehavior.AlternateShootPressActionName, StringComparison.OrdinalIgnoreCase)
+            && HasDummyAction(bot, Config.BotBehavior.AlternateShootPressActionName))
+        {
+            state.PreferredShootActionName = Config.BotBehavior.AlternateShootPressActionName;
+            LogBotEvent(state, $"dry-fire-fallback previous={previous} next={state.PreferredShootActionName} count={state.DryFireCount}");
+            return;
+        }
+
         LogBotEvent(state, $"dry-fire-no-fallback action={previous} count={state.DryFireCount}");
     }
 
     private void LogBotDebug(ManagedBotState state, string message)
     {
-        if (!Config.EnableDebugLogging)
+        if (!Config.EnableVerboseBotLogging)
         {
             return;
         }
@@ -1634,10 +2492,26 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     private void LogBotEvent(ManagedBotState state, string message)
     {
-        if (Config.EnableDebugLogging)
+        if (Config.EnableVerboseBotLogging)
         {
             ApiLogger.Info($"[{Name}] [BotDebug:{state.Nickname}] {message}");
         }
+    }
+
+    private void LogBotShot(ManagedBotState state, string message)
+    {
+        if (Config.EnableVerboseBotLogging)
+        {
+            ApiLogger.Info($"[{Name}] [BotShot:{state.Nickname}] {message}");
+        }
+    }
+
+    private void LogBotZoom(ManagedBotState state, string message)
+    {
+    }
+
+    private void LogBotZoomThrottled(ManagedBotState state, string message)
+    {
     }
 
     private void LogBotEventByPlayerId(int playerId, string message)
@@ -1650,7 +2524,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     private void LogAimStep(Player bot, ManagedBotState state, string message)
     {
-        if (!Config.EnableDebugLogging)
+        if (!Config.EnableVerboseBotLogging)
         {
             return;
         }
@@ -1665,12 +2539,467 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             return;
         }
 
+        int nowTick = Environment.TickCount;
+        if (string.Equals(state.LastNavigationDebugSummary, message, StringComparison.Ordinal)
+            && unchecked(nowTick - state.LastNavigationDebugTick) < Math.Max(1000, Config.BotBehavior.DebugLogIntervalMs))
+        {
+            return;
+        }
+
+        state.LastNavigationDebugTick = nowTick;
+        state.LastNavigationDebugSummary = message;
         ApiLogger.Info($"[{Name}] [BotNav:{state.Nickname}] {message}");
+    }
+
+    private bool UpdateFacilityDummyFollower(Player bot, ManagedBotState state, Player? target, bool shouldFollow)
+    {
+        GameObject? botGameObject = bot.GameObject;
+        if (botGameObject == null)
+        {
+            return false;
+        }
+
+        PlayerFollower? follower = botGameObject.GetComponent<PlayerFollower>();
+        if (!shouldFollow || target == null || target.IsDestroyed || target.ReferenceHub == null)
+        {
+            if (follower != null)
+            {
+                UnityEngine.Object.Destroy(follower);
+                LogNavDebug(bot, state, $"facility-follower stop target={target?.Nickname ?? "none"}");
+            }
+
+            return false;
+        }
+
+        if (follower == null)
+        {
+            follower = botGameObject.AddComponent<PlayerFollower>();
+            LogNavDebug(bot, state, $"facility-follower start target={target.Nickname}#{target.PlayerId}");
+        }
+
+        float followSpeed = GetFacilityDummyFollowSpeed(bot);
+        follower.Init(
+            target.ReferenceHub,
+            Config.BotBehavior.FacilityDummyFollowMaxDistance,
+            Config.BotBehavior.FacilityDummyFollowMinDistance,
+            followSpeed);
+        state.LastMoveIntentLabel = "facility-follower";
+        state.LastMoveIntentTick = Environment.TickCount;
+        return true;
+    }
+
+    private float GetFacilityDummyFollowSpeed(Player bot)
+    {
+        return bot.Role switch
+        {
+            RoleTypeId.Scp939 => Config.BotBehavior.FacilityDummyFollowSpeedScp939,
+            RoleTypeId.Scp3114 => Config.BotBehavior.FacilityDummyFollowSpeedScp3114,
+            RoleTypeId.Scp049 => Config.BotBehavior.FacilityDummyFollowSpeedScp049,
+            RoleTypeId.Scp106 => Config.BotBehavior.FacilityDummyFollowSpeedScp106,
+            _ => Config.BotBehavior.FacilityDummyFollowSpeed,
+        };
+    }
+
+    private void ScheduleNavHeartbeat(int generation)
+    {
+        Schedule(() => RunNavHeartbeat(generation), NavHeartbeatIntervalMs);
+    }
+
+    private void RunNavHeartbeat(int generation)
+    {
+        if (!IsCurrentGeneration(generation) || !_warmupActive)
+        {
+            return;
+        }
+
+        if (!Config.EnableVerboseBotLogging)
+        {
+            ScheduleNavHeartbeat(generation);
+            return;
+        }
+
+        foreach (KeyValuePair<int, ManagedBotState> entry in _managedBots.ToArray())
+        {
+            int playerId = entry.Key;
+            ManagedBotState state = entry.Value;
+            if (!Player.TryGet(playerId, out Player bot) || bot.IsDestroyed || bot.Role == RoleTypeId.Spectator)
+            {
+                continue;
+            }
+
+            ApiLogger.Info(
+                $"[{Name}] [BotState:{state.Nickname}] state={state.LastStateSummary} target={state.LastTargetSummary} " +
+                $"role={bot.Role} team={bot.Team} navReason={state.LastNavigationReason} path={state.NavigationWaypointIndex}/{state.NavigationWaypoints.Count} " +
+                $"campRemainingMs={GetRemainingTickMs(state.CampUntilTick)} campCooldownMs={GetRemainingTickMs(state.CampCooldownUntilTick)} " +
+                $"pos={FormatVector(bot.Position)}");
+        }
+
+        ScheduleNavHeartbeat(generation);
+    }
+
+    private void ClearArenaDebugVisuals()
+    {
+        DestroyDebugToys(_runtimeNavMeshDebugEdges);
+        _runtimeNavMeshDebugEdges.Clear();
+        ClearNavAgentDebugVisuals();
+        DestroyLegacyArenaDebugToys();
+    }
+
+    private void UpdateFacilityNavAgentFollower(Player bot, ManagedBotState state, bool useNavMesh, bool useDust2Arena)
+    {
+        if (bot.GameObject == null)
+        {
+            return;
+        }
+
+        FacilityNavAgentFollower? follower = bot.GameObject.GetComponent<FacilityNavAgentFollower>();
+        if (useDust2Arena
+            || !useNavMesh
+            || !Config.BotBehavior.FacilityNavMeshDirectPositionControl
+            || state.NavigationAgent == null)
+        {
+            if (follower != null)
+            {
+                UnityEngine.Object.Destroy(follower);
+            }
+
+            return;
+        }
+
+        if (follower == null)
+        {
+            follower = bot.GameObject.AddComponent<FacilityNavAgentFollower>();
+        }
+
+        follower.Init(bot, state, () => Config.BotBehavior, LogNavDebug);
+    }
+
+    private void UpdateNavAgentDebugVisual(Player bot, ManagedBotState state, bool useNavMesh, bool useDust2Arena)
+    {
+        if (useDust2Arena
+            || !useNavMesh
+            || !Config.BotBehavior.VisualizeFacilityNavAgents)
+        {
+            DestroyNavAgentDebugToy(bot.PlayerId);
+            return;
+        }
+
+        NavMeshAgent? agent = state.NavigationAgent;
+        if (agent == null || !agent.enabled)
+        {
+            DestroyNavAgentDebugToy(bot.PlayerId);
+            return;
+        }
+
+        Vector3 markerPosition;
+        Color markerColor;
+        if (agent.isOnNavMesh)
+        {
+            markerPosition = agent.nextPosition;
+            markerColor = new Color(1.0f, 0.0f, 1.0f, 0.95f);
+        }
+        else
+        {
+            markerPosition = agent.transform.position;
+            markerColor = new Color(1.0f, 0.9f, 0.0f, 0.95f);
+        }
+
+        float size = Mathf.Max(0.15f, Config.BotBehavior.FacilityNavAgentDebugMarkerSize);
+        markerPosition += Vector3.up * Mathf.Max(0.2f, Config.BotBehavior.FacilityRuntimeNavMeshDebugHeightOffset + 0.45f);
+
+        if (!_navAgentDebugToys.TryGetValue(bot.PlayerId, out PrimitiveObjectToyWrapper toy)
+            || toy == null
+            || toy.IsDestroyed)
+        {
+            toy = SpawnNavAgentDebugToy(markerPosition, size, markerColor);
+            if (toy == null)
+            {
+                return;
+            }
+
+            _navAgentDebugToys[bot.PlayerId] = toy;
+        }
+
+        toy.Position = markerPosition;
+        toy.Scale = new Vector3(size, Mathf.Max(size, size * 1.8f), size);
+        toy.Color = markerColor;
+    }
+
+    private PrimitiveObjectToyWrapper? SpawnNavAgentDebugToy(Vector3 position, float size, Color color)
+    {
+        try
+        {
+            PrimitiveObjectToyWrapper toy = PrimitiveObjectToyWrapper.Create(
+                position,
+                Quaternion.identity,
+                new Vector3(size, Mathf.Max(size, size * 1.8f), size),
+                null!,
+                false);
+            toy.Type = PrimitiveType.Cube;
+            toy.Color = color;
+            toy.Flags = PrimitiveFlags.Visible;
+            toy.IsStatic = false;
+            toy.MovementSmoothing = 0;
+            toy.SyncInterval = 0.05f;
+            toy.Spawn();
+            return toy;
+        }
+        catch (Exception ex)
+        {
+            ApiLogger.Warn($"[{Name}] Failed to spawn facility NavMesh agent debug marker: {ex.Message}");
+            return null;
+        }
+    }
+
+    private void DestroyNavAgentDebugToy(int playerId)
+    {
+        if (!_navAgentDebugToys.TryGetValue(playerId, out PrimitiveObjectToyWrapper toy))
+        {
+            return;
+        }
+
+        if (toy != null && !toy.IsDestroyed)
+        {
+            toy.Destroy();
+        }
+
+        _navAgentDebugToys.Remove(playerId);
+    }
+
+    private void ClearNavAgentDebugVisuals()
+    {
+        DestroyDebugToys(_navAgentDebugToys.Values);
+        _navAgentDebugToys.Clear();
+    }
+
+    private void RebuildRuntimeNavMeshDebugVisuals()
+    {
+        ClearArenaDebugVisuals();
+        if (!Config.Dust2Map.VisualizeRuntimeNavMesh || !_dust2MapService.HasRuntimeNavMesh)
+        {
+            return;
+        }
+
+        IReadOnlyList<NavMeshDebugEdge> edges = _dust2MapService.GetRuntimeNavMeshDebugEdges(Config.Dust2Map.RuntimeNavMeshMaxDebugEdges);
+        foreach (NavMeshDebugEdge edge in edges)
+        {
+            PrimitiveObjectToyWrapper? toy = SpawnDebugEdge(
+                edge.Start + (Vector3.up * Config.Dust2Map.RuntimeNavMeshDebugHeightOffset),
+                edge.End + (Vector3.up * Config.Dust2Map.RuntimeNavMeshDebugHeightOffset),
+                Mathf.Max(0.01f, Config.Dust2Map.RuntimeNavMeshDebugEdgeWidth),
+                new Color(0.0f, 0.85f, 1f, 0.82f));
+            if (toy != null)
+            {
+                _runtimeNavMeshDebugEdges.Add(toy);
+            }
+        }
+
+        if (Config.EnableArenaLogging)
+        {
+            ApiLogger.Info($"[{Name}] [NavMeshDebug] rendered {_runtimeNavMeshDebugEdges.Count}/{edges.Count} runtime NavMesh edges.");
+        }
+    }
+
+    private void RebuildFacilityNavMeshDebugVisuals()
+    {
+        ClearArenaDebugVisuals();
+        if (!Config.BotBehavior.VisualizeFacilityNavMesh)
+        {
+            return;
+        }
+
+        IReadOnlyList<NavMeshDebugEdge> edges = _facilityNavMeshService.HasRuntimeNavMesh
+            ? _facilityNavMeshService.GetRuntimeNavMeshDebugEdges(Config.BotBehavior.FacilityRuntimeNavMeshMaxDebugEdges)
+            : Array.Empty<NavMeshDebugEdge>();
+        foreach (NavMeshDebugEdge edge in edges)
+        {
+            PrimitiveObjectToyWrapper? toy = SpawnDebugEdge(
+                edge.Start + (Vector3.up * Config.BotBehavior.FacilityRuntimeNavMeshDebugHeightOffset),
+                edge.End + (Vector3.up * Config.BotBehavior.FacilityRuntimeNavMeshDebugHeightOffset),
+                Mathf.Max(0.01f, Config.BotBehavior.FacilityRuntimeNavMeshDebugEdgeWidth),
+                new Color(0.1f, 1.0f, 0.25f, 0.72f));
+            if (toy != null)
+            {
+                _runtimeNavMeshDebugEdges.Add(toy);
+            }
+        }
+
+        IReadOnlyList<NavMeshDebugSample> samples = Config.BotBehavior.VisualizeFacilityNavMeshSamples
+            ? _facilityNavMeshService.GetLoadedNavMeshDebugSamples(
+                Config.BotBehavior.FacilityRuntimeNavMeshMaxDebugSamples,
+                Config.BotBehavior.FacilityRuntimeNavMeshDebugSampleSpacing,
+                Config.BotBehavior.FacilityRuntimeNavMeshDebugSampleRadius,
+                Config.BotBehavior.FacilityRuntimeNavMeshDebugSampleDistance)
+            : Array.Empty<NavMeshDebugSample>();
+        foreach (NavMeshDebugSample sample in samples)
+        {
+            PrimitiveObjectToyWrapper? toy = SpawnDebugPoint(
+                sample.Position + (Vector3.up * Config.BotBehavior.FacilityRuntimeNavMeshDebugHeightOffset),
+                Mathf.Max(0.04f, Config.BotBehavior.FacilityRuntimeNavMeshDebugSampleSize),
+                new Color(0.0f, 1.0f, 0.15f, 0.62f));
+            if (toy != null)
+            {
+                _runtimeNavMeshDebugEdges.Add(toy);
+            }
+        }
+
+        if (Config.BotBehavior.FacilityRuntimeNavMeshLogBuild || Config.BotBehavior.NavDebugLogging)
+        {
+            ApiLogger.Info(
+                $"[{Name}] [FacilityNavMeshDebug] rendered runtimeEdges={edges.Count} sampledPoints={samples.Count} toys={_runtimeNavMeshDebugEdges.Count}. " +
+                $"{_facilityNavMeshService.BuildStatus(Config.BotBehavior)} {_facilityNavMeshService.BuildTriangulationStatus()}");
+        }
+    }
+
+    private PrimitiveObjectToyWrapper? SpawnDebugEdge(Vector3 start, Vector3 end, float width, Color color)
+    {
+        Vector3 delta = end - start;
+        float length = delta.magnitude;
+        if (length <= 0.03f)
+        {
+            return null;
+        }
+
+        try
+        {
+            PrimitiveObjectToyWrapper toy = PrimitiveObjectToyWrapper.Create(
+                Vector3.Lerp(start, end, 0.5f),
+                Quaternion.LookRotation(delta.normalized, Vector3.up),
+                new Vector3(width, width, length),
+                null!,
+                false);
+            toy.Type = PrimitiveType.Cube;
+            toy.Color = color;
+            toy.Flags = PrimitiveFlags.Visible;
+            toy.IsStatic = true;
+            toy.MovementSmoothing = 0;
+            toy.SyncInterval = 0.5f;
+            toy.Spawn();
+            return toy;
+        }
+        catch (Exception ex)
+        {
+            ApiLogger.Warn($"[{Name}] Failed to spawn runtime NavMesh debug edge: {ex.Message}");
+            return null;
+        }
+    }
+
+    private PrimitiveObjectToyWrapper? SpawnDebugPoint(Vector3 position, float size, Color color)
+    {
+        try
+        {
+            PrimitiveObjectToyWrapper toy = PrimitiveObjectToyWrapper.Create(
+                position,
+                Quaternion.identity,
+                new Vector3(size, Mathf.Max(0.01f, size * 0.25f), size),
+                null!,
+                false);
+            toy.Type = PrimitiveType.Cube;
+            toy.Color = color;
+            toy.Flags = PrimitiveFlags.Visible;
+            toy.IsStatic = true;
+            toy.MovementSmoothing = 0;
+            toy.SyncInterval = 0.5f;
+            toy.Spawn();
+            return toy;
+        }
+        catch (Exception ex)
+        {
+            ApiLogger.Warn($"[{Name}] Failed to spawn runtime NavMesh debug point: {ex.Message}");
+            return null;
+        }
+    }
+
+    private static void DestroyDebugToys(IEnumerable<PrimitiveObjectToyWrapper> toys)
+    {
+        foreach (PrimitiveObjectToyWrapper toy in toys.Where(toy => toy != null))
+        {
+            if (!toy.IsDestroyed)
+            {
+                toy.Destroy();
+            }
+        }
+    }
+
+    private void DestroyLegacyArenaDebugToys()
+    {
+        Vector3 arenaOrigin = Config.Dust2Map.Origin.ToVector3();
+        int destroyed = 0;
+        foreach (PrimitiveObjectToyWrapper toy in PrimitiveObjectToyWrapper.List.ToArray())
+        {
+            if (toy == null
+                || toy.IsDestroyed
+                || !toy.IsStatic
+                || Mathf.Abs(toy.Position.y - arenaOrigin.y) > 40f
+                || HorizontalDistance(toy.Position, arenaOrigin) > 220f)
+            {
+                continue;
+            }
+
+            bool oldSphere = toy.Type == PrimitiveType.Sphere
+                && toy.Scale.x <= 0.5f
+                && toy.Scale.y <= 0.5f
+                && toy.Scale.z <= 0.5f;
+            bool oldNavMeshEdge = toy.Type == PrimitiveType.Cube
+                && toy.Scale.x <= 0.12f
+                && toy.Scale.y <= 0.12f
+                && toy.Color.r <= 0.15f
+                && toy.Color.g >= 0.65f
+                && toy.Color.b >= 0.75f;
+            if (!oldSphere && !oldNavMeshEdge)
+            {
+                continue;
+            }
+
+            toy.Destroy();
+            destroyed++;
+        }
+
+        if (destroyed > 0 && Config.EnableArenaLogging)
+        {
+            ApiLogger.Info($"[{Name}] Removed {destroyed} legacy Dust2 debug toys.");
+        }
+    }
+
+    private static float HorizontalDistance(Vector3 left, Vector3 right)
+    {
+        left.y = 0f;
+        right.y = 0f;
+        return Vector3.Distance(left, right);
+    }
+
+    private static string BuildBlockedMoveSummary(ManagedBotState state, int nowTick)
+    {
+        List<string> parts = new();
+        AddBlockedMoveSummary(parts, "fwd", state.ForwardBlockedUntilTick, nowTick);
+        AddBlockedMoveSummary(parts, "back", state.BackBlockedUntilTick, nowTick);
+        AddBlockedMoveSummary(parts, "left", state.LeftBlockedUntilTick, nowTick);
+        AddBlockedMoveSummary(parts, "right", state.RightBlockedUntilTick, nowTick);
+        return parts.Count == 0 ? "none" : string.Join(",", parts);
+    }
+
+    private static void AddBlockedMoveSummary(List<string> parts, string label, int untilTick, int nowTick)
+    {
+        int remainingMs = untilTick == 0 ? 0 : Math.Max(0, unchecked(untilTick - nowTick));
+        if (remainingMs > 0)
+        {
+            parts.Add($"{label}:{remainingMs}");
+        }
+    }
+
+    private static int GetRemainingTickMs(int untilTick)
+    {
+        return untilTick == 0 ? 0 : Math.Max(0, unchecked(untilTick - Environment.TickCount));
+    }
+
+    private static string FormatVector(Vector3 vector)
+    {
+        return $"({vector.x:F1},{vector.y:F1},{vector.z:F1})";
     }
 
     private void LogAimDebug(Player bot, ManagedBotState state, Player target, float yaw, float pitch, Vector3 direction)
     {
-        if (!Config.EnableDebugLogging)
+        if (!Config.EnableVerboseBotLogging)
         {
             return;
         }
@@ -1718,7 +3047,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     private void LogCombatState(Player bot, ManagedBotState state, BotTargetSelection target, FirearmItem? firearm)
     {
-        if (!Config.EnableDebugLogging)
+        if (!Config.EnableVerboseBotLogging)
         {
             return;
         }
@@ -1754,7 +3083,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     public string BuildStatus()
     {
-        return $"active={_warmupActive}, roundStarted={Round.IsRoundStarted}, bots={_managedBots.Count}/{Config.BotCount}, humanRole={Config.HumanRole}, botRole={Config.BotRole}, humanRespawnMs={Config.HumanRespawnDelayMs}, botRespawnMs={Config.BotRespawnDelayMs}, difficulty={Config.DifficultyPreset}, aimode={Config.BotBehavior.AiMode}";
+        return $"active={_warmupActive}, roundStarted={Round.IsRoundStarted}, bots={_managedBots.Count}/{Config.BotCount}, humanRole={Config.HumanRole}, botRole={Config.BotRole}, humanRespawnMs={Config.HumanRespawnDelayMs}, botRespawnMs={Config.BotRespawnDelayMs}, difficulty={Config.DifficultyPreset}, aimode={Config.BotBehavior.AiMode}, scpSpeeds=(939:{Config.BotBehavior.FacilityDummyFollowSpeedScp939:F1},3114:{Config.BotBehavior.FacilityDummyFollowSpeedScp3114:F1},049:{Config.BotBehavior.FacilityDummyFollowSpeedScp049:F1},106:{Config.BotBehavior.FacilityDummyFollowSpeedScp106:F1}), bombMode=({_bombModeService.BuildStatus()}), dust2=({_dust2MapService.BuildStatus(Config.Dust2Map)}), facilityNav=({_facilityNavMeshService.BuildStatus(Config.BotBehavior)})";
     }
 
     public bool StartRoundIfNeeded(out string response)
@@ -1796,6 +3125,8 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         _warmupGeneration++;
         _warmupActive = false;
         CleanupManagedBots();
+        _bombModeService.ResetRuntime();
+        CleanupArenaMap(returnHumansToFacility: true);
         response = "Warmup stopped and all managed bots were removed.";
         return true;
     }
@@ -1857,6 +3188,27 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                 response = $"Bot respawn delay set to {Config.BotRespawnDelayMs} ms.";
                 return true;
 
+            case "speed":
+            case "followspeed":
+            case "facilityspeed":
+                return SetFacilityFollowSpeed(value, out response);
+
+            case "939speed":
+            case "scp939speed":
+                return SetScpFacilityFollowSpeed(RoleTypeId.Scp939, value, out response);
+
+            case "3114speed":
+            case "scp3114speed":
+                return SetScpFacilityFollowSpeed(RoleTypeId.Scp3114, value, out response);
+
+            case "049speed":
+            case "scp049speed":
+                return SetScpFacilityFollowSpeed(RoleTypeId.Scp049, value, out response);
+
+            case "106speed":
+            case "scp106speed":
+                return SetScpFacilityFollowSpeed(RoleTypeId.Scp106, value, out response);
+
             case "humanrole":
                 if (!Enum.TryParse(value, true, out RoleTypeId humanRole))
                 {
@@ -1904,6 +3256,20 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                 response = $"SuppressRoundEnd set to {Config.SuppressRoundEnd}.";
                 return true;
 
+            case "mode":
+                return SetRoundMode(value, out response);
+
+            case "map":
+            case "dust2":
+            case "dust2map":
+                if (!bool.TryParse(value, out bool dust2Enabled))
+                {
+                    response = "map must be true or false.";
+                    return false;
+                }
+
+                return SetDust2MapEnabled(dust2Enabled, out response);
+
             case "keepmagfilled":
             case "keepmagazinefilled":
                 if (!bool.TryParse(value, out bool keepMagazineFilled))
@@ -1919,9 +3285,457 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             case "aimode":
                 return ApplyAiMode(value, out response);
 
+            case "retreatspeed":
+            case "backoffspeed":
+            case "closeretreatspeed":
+            case "closeretreatspeedscale":
+                return SetCloseRetreatSpeedScale(value, out response);
+
+            case "language":
+            case "lang":
+            case "locale":
+                return SetLanguage(value, out response);
+
             default:
                 response = $"Unknown setting '{key}'.";
                 return false;
+        }
+    }
+
+    public bool SetLanguage(string rawValue, out string response)
+    {
+        if (!WarmupLocalization.TryNormalizeLanguage(rawValue, out string language))
+        {
+            response = WarmupLocalization.T("Unknown language. Use en or cn.", "未知语言。请使用 en 或 cn。");
+            return false;
+        }
+
+        Config.Language = language;
+        WarmupLocalization.SetLanguage(language);
+        response = WarmupLocalization.T($"Language set to {language}.", $"语言已设置为 {language}。");
+        return true;
+    }
+
+    public bool SetCloseRetreatSpeedScale(string rawValue, out string response)
+    {
+        if (!float.TryParse(rawValue, out float scale) || scale <= 0f || scale > 2f)
+        {
+            response = WarmupLocalization.T(
+                "Retreat speed scale must be a number greater than 0 and no more than 2.",
+                "后退速度倍率必须大于 0 且不超过 2。");
+            return false;
+        }
+
+        Config.BotBehavior.CloseRetreatSpeedScale = scale;
+        response = WarmupLocalization.T(
+            $"Close retreat speed scale set to {scale:F2}.",
+            $"近距离后退速度倍率已设置为 {scale:F2}。");
+        return true;
+    }
+
+    public bool SetFacilityFollowSpeed(string rawValue, out string response)
+    {
+        if (!TryParsePositiveSpeed(rawValue, out float speed, out response))
+        {
+            return false;
+        }
+
+        Config.BotBehavior.FacilityDummyFollowSpeed = speed;
+        response = $"Default facility follow speed set to {speed:F2}.";
+        return true;
+    }
+
+    public bool SetScpFacilityFollowSpeed(RoleTypeId role, string rawValue, out string response)
+    {
+        if (!TryParsePositiveSpeed(rawValue, out float speed, out response))
+        {
+            return false;
+        }
+
+        switch (role)
+        {
+            case RoleTypeId.Scp939:
+                Config.BotBehavior.FacilityDummyFollowSpeedScp939 = speed;
+                break;
+            case RoleTypeId.Scp3114:
+                Config.BotBehavior.FacilityDummyFollowSpeedScp3114 = speed;
+                break;
+            case RoleTypeId.Scp049:
+                Config.BotBehavior.FacilityDummyFollowSpeedScp049 = speed;
+                break;
+            case RoleTypeId.Scp106:
+                Config.BotBehavior.FacilityDummyFollowSpeedScp106 = speed;
+                break;
+            default:
+                response = $"Unsupported SCP speed role: {role}.";
+                return false;
+        }
+
+        response = $"{role} facility follow speed set to {speed:F2}.";
+        return true;
+    }
+
+    private static bool TryParsePositiveSpeed(string rawValue, out float speed, out string response)
+    {
+        if (!float.TryParse(rawValue, out speed) || speed <= 0f || speed > 50f)
+        {
+            response = "Speed must be a number greater than 0 and no more than 50.";
+            return false;
+        }
+
+        response = "";
+        return true;
+    }
+
+    public bool SetRoundMode(string rawValue, out string response)
+    {
+        if (!Enum.TryParse(rawValue, true, out WarmupRoundMode mode))
+        {
+            response = "Unknown mode. Use standard or bomb.";
+            return false;
+        }
+
+        _bombModeService.SetMode(mode);
+        if (_warmupActive)
+        {
+            RestartWarmup($"mode changed to {mode}");
+            response = $"Round mode set to {mode}. Warmup restart requested.";
+            return true;
+        }
+
+        response = $"Round mode set to {mode}.";
+        return true;
+    }
+
+    public bool SetDust2MapEnabled(bool enabled, out string response)
+    {
+        Config.Dust2Map.Enabled = enabled;
+        if (_warmupActive)
+        {
+            RestartWarmup(enabled ? "dust2 map enabled" : "dust2 map disabled");
+            response = enabled
+                ? "Dust2 map enabled. Warmup restart requested."
+                : "Dust2 map disabled. Warmup restart requested.";
+            return true;
+        }
+
+        if (!enabled)
+        {
+            CleanupArenaMap(returnHumansToFacility: true);
+        }
+
+        response = enabled
+            ? "Dust2 map enabled. It will load on the next warmup start."
+            : "Dust2 map disabled.";
+        return true;
+    }
+
+    private void PrepareArenaMapForWarmup()
+    {
+        _dust2MapService.Unload();
+        ClearArenaDebugVisuals();
+        if (!ShouldUseDust2Arena())
+        {
+            if (Config.EnableArenaLogging)
+            {
+                ApiLogger.Info($"[{Name}] Dust2 arena not requested for this warmup run.");
+            }
+
+            return;
+        }
+
+        bool forceDust2Load = _bombModeService.Enabled && !Config.Dust2Map.Enabled;
+        if (Config.EnableArenaLogging)
+        {
+            ApiLogger.Info($"[{Name}] Attempting to load Dust2 arena. {_dust2MapService.BuildStatus(Config.Dust2Map, forceDust2Load)}");
+        }
+
+        if (_dust2MapService.TryLoad(Config.Dust2Map, out string response, forceDust2Load))
+        {
+            if (_dust2MapService.TryBakeRuntimeNavMesh(Config.Dust2Map, out string navMeshResponse))
+            {
+                if (Config.EnableArenaLogging)
+                {
+                    ApiLogger.Info($"[{Name}] {navMeshResponse}");
+                }
+
+                RebuildRuntimeNavMeshDebugVisuals();
+            }
+            else if (Config.Dust2Map.RuntimeNavMeshEnabled && Config.EnableArenaLogging)
+            {
+                ApiLogger.Warn($"[{Name}] {navMeshResponse}");
+            }
+
+            if (Config.EnableArenaLogging)
+            {
+                ApiLogger.Info($"[{Name}] {response}");
+            }
+
+            return;
+        }
+
+        if (Config.EnableArenaLogging)
+        {
+            ApiLogger.Warn($"[{Name}] Dust2 warmup arena could not be loaded: {response}");
+        }
+    }
+
+    private void PrepareFacilityNavMeshForWarmup()
+    {
+        if (ShouldUseDust2Arena())
+        {
+            return;
+        }
+
+        _facilityNavMeshService.RemoveRuntimeNavMesh();
+        DestroyDebugToys(_runtimeNavMeshDebugEdges);
+        _runtimeNavMeshDebugEdges.Clear();
+        ClearNavAgentDebugVisuals();
+
+        if (!Config.BotBehavior.FacilitySurfaceRuntimeNavMeshEnabled)
+        {
+            return;
+        }
+
+        if (_facilityNavMeshService.TryBakeSurfaceRuntimeNavMesh(Config.BotBehavior, out string navMeshResponse))
+        {
+            if (Config.BotBehavior.FacilityRuntimeNavMeshLogBuild || Config.BotBehavior.NavDebugLogging)
+            {
+                ApiLogger.Info($"[{Name}] {navMeshResponse}");
+            }
+
+            RebuildFacilityNavMeshDebugVisuals();
+        }
+        else if (Config.BotBehavior.FacilityRuntimeNavMeshLogBuild || Config.BotBehavior.NavDebugLogging)
+        {
+            ApiLogger.Warn($"[{Name}] {navMeshResponse}");
+        }
+    }
+
+    private void CleanupArenaMap(bool returnHumansToFacility)
+    {
+        bool wasLoaded = _dust2MapService.IsLoaded;
+        if (returnHumansToFacility && wasLoaded)
+        {
+            ReturnManagedHumansToFacility();
+        }
+
+        _dust2MapService.Unload();
+        ClearArenaDebugVisuals();
+    }
+
+    private bool ShouldUseDust2Arena()
+    {
+        return Config.Dust2Map.Enabled || _bombModeService.Enabled;
+    }
+
+    private void ReturnManagedHumansToFacility()
+    {
+        foreach (Player player in Player.List.Where(IsManagedHuman))
+        {
+            player.SetRole(GetHumanRole(player), RoleChangeReason.RemoteAdmin, RoleSpawnFlags.All);
+        }
+    }
+
+    private int ApplyArenaSpawnIfNeeded(Player player, bool isBot)
+    {
+        if (!ShouldUseDust2Arena() || !_dust2MapService.IsLoaded)
+        {
+            if (ShouldUseDust2Arena() && Config.EnableArenaLogging)
+            {
+                ApiLogger.Warn($"[{Name}] Arena spawn skipped for {player.Nickname} because Dust2 is not loaded.");
+            }
+
+            return 0;
+        }
+
+        Vector3 spawnPosition;
+        bool hasSpawn;
+        string spawnSide;
+        if (player.IsNTF)
+        {
+            hasSpawn = _dust2MapService.TryGetHumanSpawnPosition(Config.Dust2Map, _random, out spawnPosition);
+            spawnSide = "ct";
+        }
+        else if (player.IsChaos)
+        {
+            hasSpawn = _dust2MapService.TryGetBotSpawnPosition(Config.Dust2Map, _random, out spawnPosition);
+            spawnSide = "t";
+        }
+        else
+        {
+            hasSpawn = isBot
+                ? _dust2MapService.TryGetBotSpawnPosition(Config.Dust2Map, _random, out spawnPosition)
+                : _dust2MapService.TryGetHumanSpawnPosition(Config.Dust2Map, _random, out spawnPosition);
+            spawnSide = isBot ? "t-fallback" : "ct-fallback";
+        }
+
+        if (!hasSpawn)
+        {
+            if (Config.EnableArenaLogging)
+            {
+                ApiLogger.Warn($"[{Name}] Failed to find a Dust2 spawn marker for {(isBot ? "bot" : "human")} {player.Nickname}. Human markers=[{string.Join(", ", Config.Dust2Map.HumanSpawnMarkerNames ?? Array.Empty<string>())}] Bot markers=[{string.Join(", ", Config.Dust2Map.BotSpawnMarkerNames ?? Array.Empty<string>())}]");
+            }
+
+            return 0;
+        }
+
+        int initialDelayMs = isBot ? BotArenaSpawnDelayMs : 0;
+        if (initialDelayMs <= 0)
+        {
+            player.Position = spawnPosition;
+            if (Config.EnableArenaLogging)
+            {
+                ApiLogger.Info($"[{Name}] Arena spawn applied to {(isBot ? "bot" : "human")} {player.Nickname} side={spawnSide} at ({spawnPosition.x:F1}, {spawnPosition.y:F1}, {spawnPosition.z:F1}).");
+            }
+        }
+        else if (Config.EnableArenaLogging)
+        {
+            ApiLogger.Info($"[{Name}] Arena spawn scheduled for {(isBot ? "bot" : "human")} {player.Nickname} side={spawnSide} after {initialDelayMs} ms at ({spawnPosition.x:F1}, {spawnPosition.y:F1}, {spawnPosition.z:F1}).");
+        }
+
+        ScheduleArenaSpawnCorrections(player.PlayerId, spawnPosition, _warmupGeneration, isBot, initialDelayMs);
+        return initialDelayMs + (isBot ? ArenaSpawnCorrectionDelaysMs.Max() : 0);
+    }
+
+    private void ScheduleArenaSpawnCorrections(int playerId, Vector3 spawnPosition, int generation, bool isBot, int initialDelayMs)
+    {
+        if (initialDelayMs > 0)
+        {
+            Schedule(() =>
+            {
+                if (!IsCurrentGeneration(generation)
+                    || !ShouldUseDust2Arena()
+                    || !_dust2MapService.IsLoaded
+                    || !Player.TryGet(playerId, out Player livePlayer)
+                    || livePlayer.IsDestroyed
+                    || livePlayer.Role == RoleTypeId.Spectator)
+                {
+                    return;
+                }
+
+                livePlayer.Position = spawnPosition;
+                if (Config.EnableArenaLogging)
+                {
+                    ApiLogger.Info($"[{Name}] Arena spawn applied to {(isBot ? "bot" : "human")} {livePlayer.Nickname} after {initialDelayMs} ms at ({spawnPosition.x:F1}, {spawnPosition.y:F1}, {spawnPosition.z:F1}).");
+                }
+            }, initialDelayMs);
+        }
+
+        foreach (int delayMs in ArenaSpawnCorrectionDelaysMs)
+        {
+            Schedule(() =>
+            {
+                if (!IsCurrentGeneration(generation)
+                    || !ShouldUseDust2Arena()
+                    || !_dust2MapService.IsLoaded
+                    || !Player.TryGet(playerId, out Player livePlayer)
+                    || livePlayer.IsDestroyed
+                    || livePlayer.Role == RoleTypeId.Spectator)
+                {
+                    return;
+                }
+
+                livePlayer.Position = spawnPosition;
+                if (Config.EnableArenaLogging)
+                {
+                    ApiLogger.Info($"[{Name}] Arena spawn correction reapplied to {(isBot ? "bot" : "human")} {livePlayer.Nickname} after {initialDelayMs + delayMs} ms at ({spawnPosition.x:F1}, {spawnPosition.y:F1}, {spawnPosition.z:F1}).");
+                }
+            }, initialDelayMs + delayMs);
+        }
+    }
+
+    private void BeginBombModeRound(int generation)
+    {
+        if (!IsCurrentGeneration(generation) || !_warmupActive || !_bombModeService.Enabled)
+        {
+            return;
+        }
+
+        List<Player> participants = Player.List.Where(IsManagedParticipant).ToList();
+        if (!_dust2MapService.IsLoaded)
+        {
+            ApiLogger.Warn($"[{Name}] Bomb mode could not start because Dust2 is not loaded.");
+            return;
+        }
+
+        if (!_bombModeService.TryStartRound(_dust2MapService, participants, out string response))
+        {
+            ApiLogger.Warn($"[{Name}] {response}");
+            return;
+        }
+
+        ApiLogger.Info($"[{Name}] {response}");
+        foreach (Player player in participants.Where(player => player.IsAlive))
+        {
+            player.SendHint(response, 4f);
+        }
+
+        ScheduleBombModeTick(_bombModeService.RoundToken, generation);
+    }
+
+    private void ScheduleBombModeTick(int bombRoundToken, int generation)
+    {
+        Schedule(() => RunBombModeTick(bombRoundToken, generation), 1000);
+    }
+
+    private void RunBombModeTick(int bombRoundToken, int generation)
+    {
+        if (!IsCurrentGeneration(generation)
+            || !_warmupActive
+            || !_bombModeService.RoundActive
+            || _bombModeService.RoundToken != bombRoundToken)
+        {
+            return;
+        }
+
+        List<Player> participants = Player.List.Where(IsManagedParticipant).ToList();
+        foreach (Player player in participants.Where(player => player.IsAlive))
+        {
+            player.SendHint(_bombModeService.BuildHud(player, participants), 1.1f);
+        }
+
+        BombRoundResult result = _bombModeService.Tick(participants);
+        if (result == BombRoundResult.None)
+        {
+            ScheduleBombModeTick(bombRoundToken, generation);
+            return;
+        }
+
+        if (result == BombRoundResult.Exploded)
+        {
+            _bombModeService.HandleExplosionKill(participants);
+        }
+
+        string resultText = _bombModeService.DescribeResult(result);
+        if (!string.IsNullOrWhiteSpace(resultText))
+        {
+            foreach (Player player in participants)
+            {
+                player.SendBroadcast(resultText, 6, global::Broadcast.BroadcastFlags.Normal, true);
+            }
+        }
+
+        Schedule(() =>
+        {
+            if (IsCurrentGeneration(generation) && _warmupActive)
+            {
+                RestartWarmup("bomb mode round reset");
+            }
+        }, 6000);
+    }
+
+    private bool IsBombModeRoundActive()
+    {
+        return _bombModeService.RoundActive;
+    }
+
+    private void CancelBotBrainForRound(int playerId)
+    {
+        if (_managedBots.TryGetValue(playerId, out ManagedBotState? state))
+        {
+            state.SpawnSetupCompleted = false;
+            state.BrainToken++;
         }
     }
 
@@ -1955,7 +3769,6 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private void ApplyDifficultyPreset(WarmupDifficulty preset, bool persist)
     {
         Config.DifficultyPreset = preset;
-        Config.BotBehavior.NavDebugLogging = true;
         Config.BotBehavior.WalkForwardActionNames = new[]
         {
             "Walk forward 1.5m",
@@ -1970,17 +3783,18 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             "Walk back 0.2m",
             "Walk back 0.05m",
         };
+        Config.BotBehavior.OrbitRetreatDistance = 6.3f;
 
         switch (preset)
         {
             case WarmupDifficulty.Easy:
-                Config.BotBehavior.ThinkIntervalMinMs = 900;
-                Config.BotBehavior.ThinkIntervalMaxMs = 1350;
+                Config.BotBehavior.ThinkIntervalMinMs = 55;
+                Config.BotBehavior.ThinkIntervalMaxMs = 95;
                 Config.BotBehavior.MinShotIntervalMs = 260;
                 Config.BotBehavior.ShootReleaseDelayMs = 80;
                 Config.BotBehavior.EnableStepMovement = true;
-                Config.BotBehavior.PreferredRange = 16f;
-                Config.BotBehavior.RangeTolerance = 4f;
+                Config.BotBehavior.PreferredRange = 14.4f;
+                Config.BotBehavior.RangeTolerance = 3.6f;
                 Config.BotBehavior.MaxHorizontalAimActionsPerTick = 2;
                 Config.BotBehavior.MaxVerticalAimActionsPerTick = 1;
                 Config.BotBehavior.HorizontalAimDeadzoneDegrees = 2.0f;
@@ -1988,18 +3802,19 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                 Config.BotBehavior.EnableAdaptiveCloseRangeStrafing = false;
                 Config.BotBehavior.EnableAdaptiveCloseRangeRetreat = false;
                 Config.BotBehavior.RetreatStartDistanceBuffer = 0f;
-                Config.BotBehavior.RealisticAimSettleMs = 1500;
+                Config.BotBehavior.RealisticAimSettleMs = 4000;
+                Config.BotBehavior.FarTargetRealisticAimSettleMs = 4000;
                 Config.BotBehavior.RealisticReacquireDelayMs = 300;
                 Config.BotBehavior.RealisticInitialPitchOffsetMaxDegrees = 0f;
                 break;
             case WarmupDifficulty.Normal:
-                Config.BotBehavior.ThinkIntervalMinMs = 450;
-                Config.BotBehavior.ThinkIntervalMaxMs = 850;
+                Config.BotBehavior.ThinkIntervalMinMs = 55;
+                Config.BotBehavior.ThinkIntervalMaxMs = 95;
                 Config.BotBehavior.MinShotIntervalMs = 140;
                 Config.BotBehavior.ShootReleaseDelayMs = 40;
                 Config.BotBehavior.EnableStepMovement = true;
-                Config.BotBehavior.PreferredRange = 14f;
-                Config.BotBehavior.RangeTolerance = 2.5f;
+                Config.BotBehavior.PreferredRange = 12.6f;
+                Config.BotBehavior.RangeTolerance = 2.25f;
                 Config.BotBehavior.MaxHorizontalAimActionsPerTick = 3;
                 Config.BotBehavior.MaxVerticalAimActionsPerTick = 2;
                 Config.BotBehavior.HorizontalAimDeadzoneDegrees = 1.5f;
@@ -2007,18 +3822,19 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                 Config.BotBehavior.EnableAdaptiveCloseRangeStrafing = false;
                 Config.BotBehavior.EnableAdaptiveCloseRangeRetreat = false;
                 Config.BotBehavior.RetreatStartDistanceBuffer = 0f;
-                Config.BotBehavior.RealisticAimSettleMs = 1300;
+                Config.BotBehavior.RealisticAimSettleMs = 2500;
+                Config.BotBehavior.FarTargetRealisticAimSettleMs = 2500;
                 Config.BotBehavior.RealisticReacquireDelayMs = 250;
                 Config.BotBehavior.RealisticInitialPitchOffsetMaxDegrees = 0f;
                 break;
             case WarmupDifficulty.Hard:
-                Config.BotBehavior.ThinkIntervalMinMs = 120;
-                Config.BotBehavior.ThinkIntervalMaxMs = 220;
+                Config.BotBehavior.ThinkIntervalMinMs = 55;
+                Config.BotBehavior.ThinkIntervalMaxMs = 95;
                 Config.BotBehavior.MinShotIntervalMs = 55;
                 Config.BotBehavior.ShootReleaseDelayMs = 12;
                 Config.BotBehavior.EnableStepMovement = true;
-                Config.BotBehavior.PreferredRange = 11f;
-                Config.BotBehavior.RangeTolerance = 1f;
+                Config.BotBehavior.PreferredRange = 9.9f;
+                Config.BotBehavior.RangeTolerance = 0.9f;
                 Config.BotBehavior.MaxHorizontalAimActionsPerTick = 3;
                 Config.BotBehavior.MaxVerticalAimActionsPerTick = 2;
                 Config.BotBehavior.HorizontalAimDeadzoneDegrees = 1.0f;
@@ -2026,7 +3842,8 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                 Config.BotBehavior.EnableAdaptiveCloseRangeStrafing = false;
                 Config.BotBehavior.EnableAdaptiveCloseRangeRetreat = false;
                 Config.BotBehavior.RetreatStartDistanceBuffer = 0f;
-                Config.BotBehavior.RealisticAimSettleMs = 1000;
+                Config.BotBehavior.RealisticAimSettleMs = 1400;
+                Config.BotBehavior.FarTargetRealisticAimSettleMs = 1400;
                 Config.BotBehavior.RealisticReacquireDelayMs = 180;
                 Config.BotBehavior.RealisticInitialPitchOffsetMaxDegrees = 0f;
                 break;
@@ -2036,8 +3853,8 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                 Config.BotBehavior.MinShotIntervalMs = 24;
                 Config.BotBehavior.ShootReleaseDelayMs = 4;
                 Config.BotBehavior.EnableStepMovement = true;
-                Config.BotBehavior.PreferredRange = 8.5f;
-                Config.BotBehavior.RangeTolerance = 0.4f;
+                Config.BotBehavior.PreferredRange = 7.65f;
+                Config.BotBehavior.RangeTolerance = 0.36f;
                 Config.BotBehavior.MaxHorizontalAimActionsPerTick = 5;
                 Config.BotBehavior.MaxVerticalAimActionsPerTick = 4;
                 Config.BotBehavior.HorizontalAimDeadzoneDegrees = 0.35f;
@@ -2049,9 +3866,10 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                 Config.BotBehavior.VeryCloseRangeStrafeRepeatCount = 9;
                 Config.BotBehavior.EnableAdaptiveCloseRangeRetreat = true;
                 Config.BotBehavior.RetreatStartDistanceBuffer = 0.25f;
-                Config.BotBehavior.CloseRangeRetreatRepeatCount = 2;
-                Config.BotBehavior.VeryCloseRangeRetreatRepeatCount = 4;
+                Config.BotBehavior.CloseRangeRetreatRepeatCount = 5;
+                Config.BotBehavior.VeryCloseRangeRetreatRepeatCount = 10;
                 Config.BotBehavior.RealisticAimSettleMs = 425;
+                Config.BotBehavior.FarTargetRealisticAimSettleMs = 425;
                 Config.BotBehavior.RealisticReacquireDelayMs = 45;
                 Config.BotBehavior.RealisticInitialPitchOffsetMaxDegrees = 0f;
                 break;
@@ -2073,7 +3891,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                 NetworkServer.Destroy(bot.GameObject);
             }
 
-            _managedBots.Remove(playerId);
+            RemoveManagedBot(playerId);
         }
     }
 

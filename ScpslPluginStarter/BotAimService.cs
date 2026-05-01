@@ -7,6 +7,45 @@ namespace ScpslPluginStarter;
 
 internal sealed class BotAimService
 {
+    public void AimAtPoint(
+        Player bot,
+        ManagedBotState state,
+        Vector3 aimPoint,
+        BotBehaviorDefinition behavior,
+        Func<Player, string, bool> tryInvokeDummyAction,
+        Action<Player, ManagedBotState, string> logAimStep)
+    {
+        Vector3 eyeOrigin = GetEyeOrigin(bot, behavior.TargetAimHeightOffset);
+        state.LastEyeOrigin = eyeOrigin;
+        state.LastTorsoAimPoint = aimPoint;
+        state.LastHeadAimPoint = aimPoint;
+        state.LastComputedAimPoint = aimPoint;
+        state.LastBaseAimPoint = aimPoint;
+        state.LastAimMode = "point";
+        state.LastAimSettleProgress = 1f;
+        state.LastAimYawOffset = 0f;
+        state.LastAimPitchOffset = 0f;
+        Vector3 direction = aimPoint - eyeOrigin;
+        Vector3 flatDirection = new(direction.x, 0f, direction.z);
+        if (flatDirection.sqrMagnitude < 0.01f)
+        {
+            return;
+        }
+
+        float yaw = Mathf.Atan2(flatDirection.x, flatDirection.z) * Mathf.Rad2Deg;
+        float pitch = 0f;
+        if (behavior.EnableVerticalAim)
+        {
+            float flatDistance = flatDirection.magnitude;
+            pitch = Mathf.Atan2(direction.y, Mathf.Max(flatDistance, 0.01f)) * Mathf.Rad2Deg;
+            pitch = Mathf.Clamp(pitch, -behavior.MaxVerticalAimDegrees, behavior.MaxVerticalAimDegrees);
+        }
+
+        state.LastDesiredYaw = yaw;
+        state.LastDesiredPitch = pitch;
+        ApplyAimActions(bot, state, yaw, pitch, behavior, tryInvokeDummyAction, logAimStep);
+    }
+
     public void AimAt(
         Player bot,
         ManagedBotState state,
@@ -86,6 +125,16 @@ internal sealed class BotAimService
             state.LastAimPitchOffset = 0f;
             state.LastBaseAimPoint = state.Engagement.LastKnownAimPoint;
             return state.Engagement.LastKnownAimPoint;
+        }
+
+        if (!target.HasLineOfSight && target.IsGlobalVisionTarget)
+        {
+            state.LastAimMode = "global";
+            state.LastAimSettleProgress = 1f;
+            state.LastAimYawOffset = 0f;
+            state.LastAimPitchOffset = 0f;
+            state.LastBaseAimPoint = target.AimPoint;
+            return target.AimPoint;
         }
 
         float settleProgress = 1f;

@@ -10,6 +10,7 @@ This class is the orchestration layer. It currently owns:
 
 - LabAPI event wiring
 - warmup lifecycle
+- optional Dust2 arena lifecycle
 - bot registry
 - bot spawning and respawn scheduling
 - delayed execution via `Schedule`
@@ -17,7 +18,7 @@ This class is the orchestration layer. It currently owns:
 - config persistence
 - inventory/loadout application
 - dummy-action invocation helpers
-- debug logging
+- 5-second bot state heartbeat logging
 
 Even after the refactor, this file still contains the most surface area. When adding behavior, prefer calling into the focused services rather than adding new domain logic here.
 
@@ -47,6 +48,7 @@ This is persistent per-bot runtime state across the active life of a managed dum
 - pending shot verification state
 - preferred shoot action state
 - `BotEngagementState`
+- high-level AI controller state (`chase`, `orbit`, `camp`)
 
 ### `BotEngagementState`
 
@@ -111,23 +113,62 @@ Current note:
 Owns:
 
 - firearm equip fallback
-- realistic firing gate checks
-- reaction-time gate checks
+- LOS-based firing gate checks
 - reload-lock state updates
 
 This service intentionally does not invoke dummy shoot actions itself. The plugin still owns the final fire path because that path also interacts with bot debug logging, shot verification, fallback handling, and release scheduling.
 
-### `BotMovementService`
+### `BotControllerService`
 
 Owns:
 
-- preferred range maintenance
-- linear move vs strafe choice
-- crowd avoidance
-- stuck detection integration
-- unstuck behavior
-- close-range adaptive strafe/retreat selection
-- `BotNav` movement-state logging
+- the only bot-brain movement decisions
+- high-level state transitions (`chase`, `orbit`, `camp`)
+- constant random strafe updates
+- Dust2-vs-non-Dust2 movement routing
+- final chase/orbit/camp move intent
+- aim-point selection for visible and camp states
+- fire/reload ordering
+
+Rules to preserve:
+
+- do not shoot without LOS
+- do not let `WarmupSandboxPlugin` or other services make direct movement-branch decisions
+- non-Dust2 should still run through this controller, just without the Dust2 waypoint graph
+
+### `BotNavigationService`
+
+Owns:
+
+- Dust2 runtime NavMesh path selection
+- local NavMesh corner tracking for movement
+- graph recompute and fallback target resolution
+
+### `Dust2MapService`
+
+Owns:
+
+- runtime `ProjectMER` discovery through reflection
+- loading and unloading the copied `de_dust2` schematic
+- marker indexing by object name
+- baking a runtime Unity NavMesh from the loaded schematic colliders
+- warmup wall removal
+- CT/T spawn marker placement for humans and bots
+
+Notes:
+
+- Dust2 navigation is runtime-NavMesh only; the old sidecar waypoint marker file and debug sphere visualizers have been removed
+- Dust2 debug visuals are intentionally plugin-owned runtime toys, not schematic objects, so they can be turned on/off without mutating the map asset
+
+### `BombModeService`
+
+Owns:
+
+- command-selectable `standard` vs `bomb` round mode state
+- Dust2 bomb-site bounds and interactable lookup
+- bomb carrier assignment and bomb serial tracking
+- plant / defuse interaction rules
+- round timer and round result evaluation
 
 The bot brain gives it a target position, not a target player, so remembered-target movement can still work when LOS is lost.
 
@@ -139,15 +180,10 @@ Order of operations:
 
 1. reject stale generation or stale brain token
 2. reject dead/destroyed/spectator dummies
-3. determine whether movement is expected this tick, then update stuck state
-4. select a target through `BotTargetingService`
-5. move through `BotMovementService`
-6. equip firearm through `BotCombatService`
-7. aim through `BotAimService`
-8. manage reserve ammo
-9. reload if required
-10. fire if allowed
-11. schedule the next think tick
+3. resolve optional Dust2 search target
+4. hand the tick to `BotControllerService`
+5. let the controller select target, state, aim, move, reload, and fire
+6. schedule the next think tick
 
 This loop is intentionally timer-driven rather than coroutine-driven. Every iteration reschedules itself.
 
@@ -193,6 +229,14 @@ It tracks:
 
 This exists because dummy actions can successfully invoke without producing a real firearm shot.
 
+Regression guardrails:
+
+- prefer the concrete firearm module category before the `(ANY)` module when resolving shoot actions
+- keep shot verification even if noisy debug logs are disabled
+- avoid duplicate spawn setup for the same bot life before delaying brain start in bomb mode
+- keep the controller as the only owner of bot movement decisions
+- the normal runtime log should be the 5-second state/target heartbeat; leave `BotNav` and shot diagnostics behind debug gates
+
 ## Practical Editing Guidance
 
 If you need to make changes:
@@ -202,7 +246,9 @@ If you need to make changes:
 - change target behavior in `BotTargetingService.cs`
 - change aim behavior in `BotAimService.cs`
 - change reload/fire gates in `BotCombatService.cs`
-- change movement in `BotMovementService.cs`
+- change high-level bot behavior or movement state transitions in `BotControllerService.cs`
+- change Dust2 waypoint routing in `BotNavigationService.cs`
+- change Dust2 waypoint/path debug visuals in `WarmupSandboxPlugin.cs`
 - change lifecycle/event scheduling in `WarmupSandboxPlugin.cs`
 
 If you are unsure where something belongs, ask:

@@ -11,10 +11,15 @@
   <PropertyGroup>
     <ScpslServerManagedDir>C:\Program Files (x86)\Steam\steamapps\common\SCP Secret Laboratory Dedicated Server\SCPSL_Data\Managed</ScpslServerManagedDir>
     <LabApiGlobalPluginsDir>$(APPDATA)\SCP Secret Laboratory\LabAPI\plugins\global</LabApiGlobalPluginsDir>
+    <ProjectMerSchematicsDir>$(APPDATA)\SCP Secret Laboratory\LabAPI\configs\ProjectMER\Schematics</ProjectMerSchematicsDir>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net48" Version="1.0.3" PrivateAssets="All" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="NavTemplates\*.json" />
   </ItemGroup>
 
   <ItemGroup>
@@ -42,6 +47,10 @@
       <HintPath>$(ScpslServerManagedDir)\UnityEngine.CoreModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="UnityEngine.AIModule">
+      <HintPath>$(ScpslServerManagedDir)\UnityEngine.AIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="UnityEngine.PhysicsModule">
       <HintPath>$(ScpslServerManagedDir)\UnityEngine.PhysicsModule.dll</HintPath>
       <Private>false</Private>
@@ -51,5 +60,10 @@
   <Target Name="DeployToLabApi" AfterTargets="Build">
     <MakeDir Directories="$(LabApiGlobalPluginsDir)" />
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(LabApiGlobalPluginsDir)" SkipUnchangedFiles="false" />
+    <MakeDir Directories="$(ProjectMerSchematicsDir)\de_dust2" />
+    <ItemGroup>
+      <Dust2SchematicFiles Include="Schematics\de_dust2\**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(Dust2SchematicFiles)" DestinationFiles="@(Dust2SchematicFiles->'$(ProjectMerSchematicsDir)\de_dust2\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="false" />
   </Target>
 </Project>

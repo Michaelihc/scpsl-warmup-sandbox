@@ -1,6 +1,7 @@
 using System;
 using InventorySystem.Items;
 using PlayerRoles;
+using UnityEngine;
 
 namespace ScpslPluginStarter;
 
@@ -18,11 +19,29 @@ public sealed class PluginConfig
 
     public bool BroadcastWarmupStatus { get; set; } = true;
 
+    public string Language { get; set; } = "en";
+
     public bool EnableDebugLogging { get; set; } = false;
+
+    public bool EnableVerboseBotLogging { get; set; } = false;
+
+    public bool EnableAttachmentLogging { get; set; } = false;
+
+    public bool EnableArenaLogging { get; set; } = false;
+
+    public bool EnableZoomLogging { get; set; } = false;
+
+    public bool EnableSpawnProtection { get; set; } = true;
+
+    public int SpawnProtectionDurationMs { get; set; } = 3000;
 
     public int BotCount { get; set; } = 6;
 
     public string BotNamePrefix { get; set; } = "WarmupBot";
+
+    public bool RandomizeFirearmAttachments { get; set; } = true;
+
+    public FirearmAttachmentRandomizationMode FirearmAttachmentRandomizationMode { get; set; } = FirearmAttachmentRandomizationMode.BotsOnly;
 
     public int InitialSetupDelayMs { get; set; } = 1000;
 
@@ -46,6 +65,8 @@ public sealed class PluginConfig
 
     public RoleTypeId BotRole { get; set; } = RoleTypeId.ChaosRifleman;
 
+    public bool UseBotRoleDefaultLoadout { get; set; } = true;
+
     public WarmupDifficulty DifficultyPreset { get; set; } = WarmupDifficulty.Normal;
 
     public NamedLoadoutDefinition[] HumanLoadoutPresets { get; set; } = NamedLoadoutDefinition.CreateDefaultHumanPresets();
@@ -53,6 +74,8 @@ public sealed class PluginConfig
     public LoadoutDefinition HumanLoadout { get; set; } = LoadoutDefinition.CreateDefaultHuman();
 
     public LoadoutDefinition BotLoadout { get; set; } = LoadoutDefinition.CreateDefaultBot();
+
+    public Dust2MapConfig Dust2Map { get; set; } = new();
 
     public BotBehaviorDefinition BotBehavior { get; set; } = new();
 }
@@ -71,6 +94,12 @@ public enum WarmupAiMode
     Realistic,
 }
 
+public enum FirearmAttachmentRandomizationMode
+{
+    BotsOnly,
+    AllLoadouts,
+}
+
 public sealed class LoadoutDefinition
 {
     public bool ClearInventory { get; set; } = true;
@@ -80,6 +109,8 @@ public sealed class LoadoutDefinition
     public bool EquipFirstFirearm { get; set; } = true;
 
     public bool RefillActiveFirearmOnSpawn { get; set; } = true;
+
+    public bool RandomizeFirearmAttachmentsOnSpawn { get; set; } = false;
 
     public ItemType[] Items { get; set; } = Array.Empty<ItemType>();
 
@@ -107,6 +138,7 @@ public sealed class LoadoutDefinition
     {
         return new LoadoutDefinition
         {
+            RandomizeFirearmAttachmentsOnSpawn = true,
             Items = new[]
             {
                 ItemType.GunCrossvec,
@@ -254,6 +286,80 @@ public sealed class AmmoGrant
     public ushort Amount { get; set; } = 120;
 }
 
+public sealed class Dust2MapConfig
+{
+    public bool Enabled { get; set; }
+
+    public string SchematicName { get; set; } = "de_dust2";
+
+    public bool RuntimeNavMeshEnabled { get; set; } = true;
+
+    public float RuntimeNavMeshAgentRadius { get; set; } = 0.18f;
+
+    public float RuntimeNavMeshAgentHeight { get; set; } = 1.8f;
+
+    public float RuntimeNavMeshAgentMaxSlope { get; set; } = 50f;
+
+    public float RuntimeNavMeshAgentClimb { get; set; } = 3.0f;
+
+    public bool RuntimeNavMeshUseRenderMeshes { get; set; } = true;
+
+    public float RuntimeNavMeshSampleDistance { get; set; } = 3.0f;
+
+    public float RuntimeNavMeshBoundsPadding { get; set; } = 6.0f;
+
+    public float RuntimeNavMeshMinRegionArea { get; set; } = 0.5f;
+
+    public bool VisualizeRuntimeNavMesh { get; set; } = true;
+
+    public int RuntimeNavMeshMaxDebugEdges { get; set; } = 6000;
+
+    public float RuntimeNavMeshDebugEdgeWidth { get; set; } = 0.035f;
+
+    public float RuntimeNavMeshDebugHeightOffset { get; set; } = 0.06f;
+
+    public SerializableVector3 Origin { get; set; } = new(0f, 30f, 30f);
+
+    public SerializableVector3 Rotation { get; set; } = new(0f, 0f, 0f);
+
+    public SerializableVector3 Scale { get; set; } = new(1f, 1f, 1f);
+
+    public float HumanSpawnJitterRadius { get; set; } = 2f;
+
+    public float BotSpawnJitterRadius { get; set; } = 2f;
+
+    public bool RemoveWarmupWalls { get; set; } = true;
+
+    public string[] HumanSpawnMarkerNames { get; set; } = { "Spawnpoint_Counter" };
+
+    public string[] BotSpawnMarkerNames { get; set; } = { "Spawnpoint_Terrorist" };
+}
+
+public sealed class SerializableVector3
+{
+    public SerializableVector3()
+    {
+    }
+
+    public SerializableVector3(float x, float y, float z)
+    {
+        X = x;
+        Y = y;
+        Z = z;
+    }
+
+    public float X { get; set; }
+
+    public float Y { get; set; }
+
+    public float Z { get; set; }
+
+    public Vector3 ToVector3()
+    {
+        return new Vector3(X, Y, Z);
+    }
+}
+
 public sealed class BotBehaviorDefinition
 {
     public WarmupAiMode AiMode { get; set; } = WarmupAiMode.Classic;
@@ -264,9 +370,123 @@ public sealed class BotBehaviorDefinition
 
     public bool EnableObstacleNavigation { get; set; } = true;
 
+    public bool UseFacilityNavMesh { get; set; } = false;
+
+    public bool UseFacilitySurfaceNavMesh { get; set; } = true;
+
+    public float FacilityNavMeshSampleDistance { get; set; } = 50.0f;
+
+    public bool FacilityRuntimeNavMeshEnabled { get; set; } = false;
+
+    public bool FacilitySurfaceRuntimeNavMeshEnabled { get; set; } = true;
+
+    public float FacilityRuntimeNavMeshAgentRadius { get; set; } = 0.25f;
+
+    public float FacilityRuntimeNavMeshAgentHeight { get; set; } = 1.8f;
+
+    public float FacilityRuntimeNavMeshAgentMaxSlope { get; set; } = 65f;
+
+    public float FacilityRuntimeNavMeshAgentClimb { get; set; } = 2.4f;
+
+    public bool FacilityRuntimeNavMeshUseRenderMeshes { get; set; } = false;
+
+    public bool FacilityRuntimeNavMeshUseRoomTemplates { get; set; } = true;
+
+    public float FacilityRuntimeNavMeshBoundsPadding { get; set; } = 8.0f;
+
+    public float FacilityRuntimeNavMeshMinRegionArea { get; set; } = 0.5f;
+
+    public bool FacilityRuntimeNavMeshIgnoreDoors { get; set; } = true;
+
+    public bool FacilityRuntimeNavMeshLogBuild { get; set; } = false;
+
+    public bool FacilityRuntimeNavMeshCreateOffMeshLinks { get; set; } = false;
+
+    public int FacilityRuntimeNavMeshMaxOffMeshLinks { get; set; } = 600;
+
+    public float FacilityRuntimeNavMeshOffMeshLinkSearchRadius { get; set; } = 3.0f;
+
+    public float FacilityRuntimeNavMeshOffMeshLinkMaxVerticalDelta { get; set; } = 2.0f;
+
+    public float FacilityRuntimeNavMeshOffMeshLinkSampleSpacing { get; set; } = 2.0f;
+
+    public float FacilityRuntimeNavMeshOffMeshLinkSampleDistance { get; set; } = 6.0f;
+
+    public float FacilityRuntimeNavMeshOffMeshLinkWidth { get; set; } = 0.4f;
+
+    public int FacilityRuntimeNavMeshOffMeshLinkCostModifier { get; set; } = 2;
+
+    public bool VisualizeFacilityNavMesh { get; set; } = false;
+
+    public int FacilityRuntimeNavMeshMaxDebugEdges { get; set; } = 12000;
+
+    public float FacilityRuntimeNavMeshDebugEdgeWidth { get; set; } = 0.025f;
+
+    public float FacilityRuntimeNavMeshDebugHeightOffset { get; set; } = 0.08f;
+
+    public bool VisualizeFacilityNavMeshSamples { get; set; } = false;
+
+    public int FacilityRuntimeNavMeshMaxDebugSamples { get; set; } = 2500;
+
+    public float FacilityRuntimeNavMeshDebugSampleSpacing { get; set; } = 2.5f;
+
+    public float FacilityRuntimeNavMeshDebugSampleRadius { get; set; } = 18.0f;
+
+    public float FacilityRuntimeNavMeshDebugSampleDistance { get; set; } = 12.0f;
+
+    public float FacilityRuntimeNavMeshDebugSampleSize { get; set; } = 0.3f;
+
+    public bool VisualizeFacilityNavAgents { get; set; } = false;
+
+    public float FacilityNavAgentDebugMarkerSize { get; set; } = 0.65f;
+
+    public bool UseFacilityDummyFollowFallback { get; set; } = true;
+
+    public bool FacilityNavMeshDirectPositionControl { get; set; } = false;
+
+    public float FacilityNavMeshDirectPositionMaxStep { get; set; } = 2.5f;
+
+    public float FacilityNavMeshDirectPositionVerticalOffset { get; set; } = 0.35f;
+
+    public float FacilityNavMeshDirectPositionMaxDropPerStep { get; set; } = 1.4f;
+
+    public float FacilityNavMeshDirectPositionBridgeDistance { get; set; } = 1.75f;
+
+    public float FacilityDummyFollowMaxDistance { get; set; } = 1000.0f;
+
+    public float FacilityDummyFollowMinDistance { get; set; } = 1.75f;
+
+    public float FacilityDummyFollowSpeed { get; set; } = 8.0f;
+
+    public float FacilityDummyFollowSpeedScp939 { get; set; } = 7.5f;
+
+    public float FacilityDummyFollowSpeedScp3114 { get; set; } = 7.5f;
+
+    public float FacilityDummyFollowSpeedScp049 { get; set; } = 7.5f;
+
+    public float FacilityDummyFollowSpeedScp106 { get; set; } = 7.5f;
+
+    public float FacilityDummyFollowDoorSlowSpeed { get; set; } = 3.5f;
+
+    public bool EnableBotDoorOpening { get; set; } = true;
+
+    public float BotDoorOpenRadius { get; set; } = 3.5f;
+
+    public bool BotForceOpenUnlockedDoors { get; set; } = false;
+
+    public bool BotWaitAtClosedDoors { get; set; } = true;
+
+    public bool BotWaitAtClosedDoorsOnlyHcz { get; set; } = true;
+
+    public float BotClosedDoorStopRadius { get; set; } = 2.75f;
+
     public bool EnableVerticalAim { get; set; } = true;
 
     public float TargetAimHeightOffset { get; set; } = 1.1f;
+
+    public bool EnableGlobalVisionFallback { get; set; } = true;
+
+    public float GlobalVisionMaxVerticalDelta { get; set; } = 25.0f;
 
     public int RealisticSightMemoryMs { get; set; } = 5000;
 
@@ -284,13 +504,39 @@ public sealed class BotBehaviorDefinition
 
     public bool RealisticLosDebugLogging { get; set; } = false;
 
-    public float MaxVerticalAimDegrees { get; set; } = 25.0f;
+    public float MaxVerticalAimDegrees { get; set; } = 60.0f;
+
+    public bool EnableFarTargetAimAssist { get; set; } = true;
+
+    public float FarTargetAimDistance { get; set; } = 20.0f;
+
+    public int FarTargetMaxHorizontalAimActionsPerTick { get; set; } = 5;
+
+    public int FarTargetMaxVerticalAimActionsPerTick { get; set; } = 4;
+
+    public float FarTargetHorizontalAimDeadzoneDegrees { get; set; } = 0.5f;
+
+    public float FarTargetVerticalAimDeadzoneDegrees { get; set; } = 0.35f;
+
+    public int FarTargetRealisticAimSettleMs { get; set; } = 700;
 
     public bool RefillAmmoBetweenBursts { get; set; } = true;
 
     public bool KeepMagazineFilled { get; set; } = false;
 
     public bool UseZoomWhileShooting { get; set; } = false;
+
+    public bool UseZoomForFarTargets { get; set; } = true;
+
+    public float FarTargetZoomDistance { get; set; } = 20.0f;
+
+    public float ScpAttackRange { get; set; } = 5.5f;
+
+    public bool EnableOrbitMovement { get; set; } = true;
+
+    public float OrbitRetreatDistance { get; set; } = 6.3f;
+
+    public float OrbitRetreatBias { get; set; } = 1.35f;
 
     public int ThinkIntervalMinMs { get; set; } = 450;
 
@@ -306,6 +552,16 @@ public sealed class BotBehaviorDefinition
 
     public int UnstuckDurationMs { get; set; } = 900;
 
+    public int ReactiveStrafeDurationMs { get; set; } = 2000;
+
+    public int ReactiveStrafeCooldownMs { get; set; } = 7000;
+
+    public int BotForwardMoveBurstCount { get; set; } = 2;
+
+    public int DoorSlowForwardMoveBurstCount { get; set; } = 1;
+
+    public float BotDoorSlowRadius { get; set; } = 4.5f;
+
     public int StuckTickThreshold { get; set; } = 2;
 
     public float NavWaypointReachDistance { get; set; } = 0.9f;
@@ -320,7 +576,59 @@ public sealed class BotBehaviorDefinition
 
     public float NavTargetMoveRecomputeDistance { get; set; } = 1.75f;
 
-    public bool NavDebugLogging { get; set; } = true;
+    public float NavMeshCornerMoveMaxStep { get; set; } = 0.75f;
+
+    public float NavMeshForwardMoveMaxAngleDegrees { get; set; } = 50.0f;
+
+    public bool NavMeshStuckNudgeEnabled { get; set; } = true;
+
+    public float NavMeshStuckNudgeStep { get; set; } = 0.65f;
+
+    public float NavMeshStuckNudgeMaxDistance { get; set; } = 8.0f;
+
+    public bool NavMeshForwardClipEnabled { get; set; } = false;
+
+    public float NavMeshForwardClipStep { get; set; } = 0.2f;
+
+    public bool NavMeshRoomCenterTeleportEnabled { get; set; } = false;
+
+    public int NavMeshRoomCenterTeleportRecoveryCount { get; set; } = 8;
+
+    public int NavMeshRoomCenterTeleportCooldownMs { get; set; } = 4000;
+
+    public float NavMeshRoomCenterTeleportSampleDistance { get; set; } = 6.0f;
+
+    public bool NavMeshStuckDoorTeleportEnabled { get; set; } = true;
+
+    public int NavMeshStuckDoorTeleportStuckMs { get; set; } = 15000;
+
+    public int NavMeshStuckDoorTeleportCooldownMs { get; set; } = 7000;
+
+    public float NavMeshStuckDoorTeleportSampleDistance { get; set; } = 4.0f;
+
+    public bool NavMeshLocalDetourEnabled { get; set; } = false;
+
+    public float NavMeshLocalDetourForwardDistance { get; set; } = 1.6f;
+
+    public float NavMeshLocalDetourLateralDistance { get; set; } = 2.0f;
+
+    public float NavMeshLocalDetourMaxWaypointDistance { get; set; } = 14.0f;
+
+    public bool NavDebugLogging { get; set; } = false;
+
+    public int NavigationExecutionLogIntervalMs { get; set; } = 750;
+
+    public bool EnableAStarFallbackNavigation { get; set; } = true;
+
+    public float AStarFallbackTriggerRadius { get; set; } = 5.0f;
+
+    public int AStarFallbackTriggerMs { get; set; } = 2500;
+
+    public float AStarGridStep { get; set; } = 1.75f;
+
+    public float AStarSearchPadding { get; set; } = 8.0f;
+
+    public int AStarMaxNodeCount { get; set; } = 4096;
 
     public int LinearMoveTickThreshold { get; set; } = 3;
 
@@ -340,19 +648,37 @@ public sealed class BotBehaviorDefinition
 
     public bool EnableAdaptiveCloseRangeRetreat { get; set; } = false;
 
+    public float CloseRetreatSpeedScale { get; set; } = 0.92f;
+
     public float RetreatStartDistanceBuffer { get; set; } = 0.0f;
 
-    public int CloseRangeRetreatRepeatCount { get; set; } = 2;
+    public int CloseRangeRetreatRepeatCount { get; set; } = 4;
 
-    public int VeryCloseRangeRetreatRepeatCount { get; set; } = 3;
+    public int VeryCloseRangeRetreatRepeatCount { get; set; } = 8;
 
-    public float PreferredRange { get; set; } = 14.0f;
+    public bool EnableNoTargetPatrol { get; set; } = true;
 
-    public float RangeTolerance { get; set; } = 2.5f;
+    public float NoTargetPatrolMinDistance { get; set; } = 8.0f;
+
+    public float NoTargetPatrolMaxDistance { get; set; } = 45.0f;
+
+    public float NoTargetPatrolReachDistance { get; set; } = 2.5f;
+
+    public int NoTargetPatrolRefreshMs { get; set; } = 12000;
+
+    public float PreferredRange { get; set; } = 12.6f;
+
+    public float RangeTolerance { get; set; } = 2.25f;
 
     public float StuckDistanceThreshold { get; set; } = 0.45f;
 
     public float NearbyBotAvoidanceRadius { get; set; } = 1.35f;
+
+    public int ForwardStuckJumpThresholdMs { get; set; } = 3500;
+
+    public int ForwardStuckJumpIntervalMs { get; set; } = 1000;
+
+    public int ForwardStuckJumpBurstCount { get; set; } = 2;
 
     public int MaxHorizontalAimActionsPerTick { get; set; } = 3;
 
@@ -392,6 +718,11 @@ public sealed class BotBehaviorDefinition
         "Walk right 0.5m",
         "Walk right 0.2m",
         "Walk right 0.05m",
+    };
+
+    public string[] JumpActionNames { get; set; } =
+    {
+        "Jump",
     };
 
     public string[] LookHorizontalPositiveActionNames { get; set; } =
@@ -434,5 +765,7 @@ public sealed class BotBehaviorDefinition
 
     public string ReloadActionName { get; set; } = "Reload->Click";
 
-    public string ZoomActionName { get; set; } = "Zoom->Click";
+    public string ZoomActionName { get; set; } = "Zoom->Hold";
+
+    public string ZoomReleaseActionName { get; set; } = "Zoom->Release";
 }
