@@ -193,6 +193,8 @@ Important top-level fields:
 - `bot_role`
 - `use_bot_role_default_loadout`
 - `enable_spawn_protection`
+- `auto_cleanup_enabled`
+- `auto_cleanup_interval_seconds`
 - `dust2_map`
 - `bot_behavior`
 

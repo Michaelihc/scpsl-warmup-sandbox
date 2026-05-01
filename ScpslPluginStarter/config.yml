@@ -12,6 +12,8 @@ enable_arena_logging: false
 enable_zoom_logging: false
 enable_spawn_protection: true
 spawn_protection_duration_ms: 3000
+auto_cleanup_enabled: true
+auto_cleanup_interval_seconds: 180
 bot_count: 6
 bot_name_prefix: WarmupBot
 randomize_firearm_attachments: true

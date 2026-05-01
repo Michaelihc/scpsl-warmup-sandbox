@@ -35,6 +35,10 @@ public sealed class PluginConfig
 
     public int SpawnProtectionDurationMs { get; set; } = 3000;
 
+    public bool AutoCleanupEnabled { get; set; } = true;
+
+    public int AutoCleanupIntervalSeconds { get; set; } = 180;
+
     public int BotCount { get; set; } = 6;
 
     public string BotNamePrefix { get; set; } = "WarmupBot";

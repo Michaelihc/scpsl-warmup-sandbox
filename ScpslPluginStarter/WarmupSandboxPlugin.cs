@@ -4,6 +4,8 @@ using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
 using AdminToys;
+using CommandSystem;
+using CommandSystem.Commands.RemoteAdmin.Cleanup;
 using CommandSystem.Commands.RemoteAdmin.Dummies;
 using CustomPlayerEffects;
 using InventorySystem.Items;
@@ -34,6 +36,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private const int BotBrainReadyRetryDelayMs = 250;
     private const int BotBrainReadyMaxAttempts = 40;
     private const int NavHeartbeatIntervalMs = 5000;
+    private const int MinimumAutoCleanupIntervalMs = 10000;
     private const ushort DefaultReserveAmmoTarget = 240;
     private static readonly int[] BotAttachmentRandomizationDelaysMs = { 250, 1000, 2500 };
 
@@ -460,6 +463,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         CleanupManagedBots();
         int generation = _warmupGeneration;
         ScheduleNavHeartbeat(generation);
+        ScheduleAutoCleanup(generation);
         Schedule(() => SetupWarmup(generation), Config.InitialSetupDelayMs);
     }
 
@@ -2402,6 +2406,103 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         });
     }
 
+    private void ScheduleAutoCleanup(int generation)
+    {
+        if (!Config.AutoCleanupEnabled || Config.AutoCleanupIntervalSeconds <= 0)
+        {
+            return;
+        }
+
+        long configuredDelayMs = (long)Config.AutoCleanupIntervalSeconds * 1000L;
+        int delayMs = (int)Math.Min(int.MaxValue, Math.Max(MinimumAutoCleanupIntervalMs, configuredDelayMs));
+        Schedule(() => RunAutoCleanup(generation), delayMs);
+    }
+
+    private void RunAutoCleanup(int generation)
+    {
+        if (!IsCurrentGeneration(generation) || !_warmupActive)
+        {
+            return;
+        }
+
+        int pickups = CleanupPickups();
+        int ragdolls = CleanupRagdolls();
+        bool bulletHoles = ExecuteCleanupCommand(new BulletHolesCommand(), out string bulletHoleResponse);
+        bool blood = ExecuteCleanupCommand(new BloodCommand(), out string bloodResponse);
+
+        if (Config.EnableDebugLogging)
+        {
+            ApiLogger.Info($"[{Name}] Auto cleanup removed pickups={pickups}, ragdolls={ragdolls}, bulletHoles={bulletHoles} ({bulletHoleResponse}), blood={blood} ({bloodResponse}).");
+        }
+
+        ScheduleAutoCleanup(generation);
+    }
+
+    private int CleanupPickups()
+    {
+        int removed = 0;
+        foreach (Pickup pickup in Pickup.List.ToArray())
+        {
+            if (pickup == null || pickup.IsDestroyed)
+            {
+                continue;
+            }
+
+            if (_bombModeService.RoundActive && pickup.Type == ItemType.SCP1576)
+            {
+                continue;
+            }
+
+            try
+            {
+                pickup.Destroy();
+                removed++;
+            }
+            catch (Exception exception)
+            {
+                if (Config.EnableDebugLogging)
+                {
+                    ApiLogger.Warn($"[{Name}] Failed to auto-clean pickup {pickup}: {exception.Message}");
+                }
+            }
+        }
+
+        return removed;
+    }
+
+    private int CleanupRagdolls()
+    {
+        int removed = 0;
+        foreach (Ragdoll ragdoll in Ragdoll.List.ToArray())
+        {
+            if (ragdoll == null || ragdoll.IsDestroyed)
+            {
+                continue;
+            }
+
+            try
+            {
+                ragdoll.Destroy();
+                removed++;
+            }
+            catch (Exception exception)
+            {
+                if (Config.EnableDebugLogging)
+                {
+                    ApiLogger.Warn($"[{Name}] Failed to auto-clean ragdoll {ragdoll}: {exception.Message}");
+                }
+            }
+        }
+
+        return removed;
+    }
+
+    private static bool ExecuteCleanupCommand(ICommand command, out string response)
+    {
+        string[] arguments = { int.MaxValue.ToString() };
+        return command.Execute(new ArraySegment<string>(arguments), AutoCleanupCommandSender.Instance, out response);
+    }
+
     private void SchedulePostShotVerification(int playerId, int brainToken, int generation)
     {
         Schedule(() =>
@@ -3917,5 +4018,20 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         return state.RespawnRole == RoleTypeId.None || state.RespawnRole == RoleTypeId.Spectator
             ? Config.BotRole
             : state.RespawnRole;
+    }
+}
+
+internal sealed class AutoCleanupCommandSender : ICommandSender
+{
+    public static readonly AutoCleanupCommandSender Instance = new();
+
+    private AutoCleanupCommandSender()
+    {
+    }
+
+    public string LogName => "WarmupSandbox AutoCleanup";
+
+    public void Respond(string message, bool success)
+    {
     }
 }
