@@ -25,7 +25,7 @@
 ## 需求
 
 - Windows 主机。
-- Steam 安装的 SCP:SL Dedicated Server。
+- Steam 安装的 SCP:SL Dedicated Server。兼容 SCP:SL 14.2.6。
 - 服务器已安装 LabAPI。
 - 可构建 `net48` 项目的 .NET SDK。
 - 只有启用 Dust2 场地时才需要 ProjectMER。

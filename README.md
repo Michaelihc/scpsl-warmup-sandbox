@@ -27,7 +27,7 @@ The plugin is built for a local SCP:SL Dedicated Server install and copies itsel
 ## Requirements
 
 - Windows host.
-- SCP:SL Dedicated Server installed through Steam.
+- SCP:SL Dedicated Server installed through Steam. Compatible with SCP:SL 14.2.6.
 - LabAPI installed on the server.
 - .NET SDK capable of building `net48` projects.
 - ProjectMER only if you want Dust2 schematic loading.
