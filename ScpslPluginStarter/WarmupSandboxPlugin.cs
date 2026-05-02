@@ -21,6 +21,7 @@ using Mirror;
 using NetworkManagerUtils.Dummies;
 using NorthwoodLib;
 using PlayerRoles;
+using RemoteAdmin.Communication;
 using UnityEngine;
 using UnityEngine.AI;
 using ApiLogger = LabApi.Features.Console.Logger;
@@ -3580,6 +3581,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             response = WarmupLocalization.T(
                 "Remote Admin opened with your normal admin permissions.",
                 "已使用你的正常管理员权限打开 Remote Admin。");
+            ScheduleRemoteAdminPlayerListRefresh(player);
             return true;
         }
 
@@ -3615,6 +3617,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             response = WarmupLocalization.T(
                 "Limited Remote Admin opened for 20 seconds.",
                 "受限 Remote Admin 已开启 20 秒。");
+            ScheduleRemoteAdminPlayerListRefresh(player);
             return true;
         }
         catch (Exception exception)
@@ -3651,6 +3654,34 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         {
             failureReason = exception.Message;
             return false;
+        }
+    }
+
+    private void ScheduleRemoteAdminPlayerListRefresh(Player player)
+    {
+        int playerId = player.PlayerId;
+        Schedule(() => SendRemoteAdminPlayerList(playerId), 250);
+        Schedule(() => SendRemoteAdminPlayerList(playerId), 1250);
+    }
+
+    private void SendRemoteAdminPlayerList(int playerId)
+    {
+        if (!Player.TryGet(playerId, out Player player)
+            || player.IsDestroyed)
+        {
+            return;
+        }
+
+        try
+        {
+            RemoteAdmin.PlayerCommandSender sender = player.ReferenceHub.queryProcessor.TryGetSender(out RemoteAdmin.PlayerCommandSender querySender)
+                ? querySender
+                : new RemoteAdmin.PlayerCommandSender(player.ReferenceHub);
+            new RaPlayerList().ReceiveData(sender, "1 0 0");
+        }
+        catch (Exception exception)
+        {
+            ApiLogger.Warn($"[WarmupSandbox] Failed to refresh Remote Admin player list for {player.Nickname}: {exception.Message}");
         }
     }
 
