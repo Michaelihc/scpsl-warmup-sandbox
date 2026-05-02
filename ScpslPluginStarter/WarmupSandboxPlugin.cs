@@ -230,6 +230,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         if (!IsLimitedRemoteAdminCommandAllowed(commandName))
         {
             ev.IsAllowed = false;
+            ApiLogger.Info($"[WarmupSandbox] Limited RA blocked command '{commandName}' from {player.Nickname}.");
             ev.Sender.RaReply(WarmupLocalization.T(
                 "Warmup limited RA only allows: forcerole, bring, goto, give. Use .help for help.",
                 "热身受限 RA 只允许：forcerole、bring、goto、give。输入 .help 查看帮助。"), false, true, string.Empty);
@@ -253,6 +254,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
 
         ev.Sender = new LimitedRemoteAdminCommandSender(playerCommandSender);
+        ApiLogger.Info($"[WarmupSandbox] Limited RA allowed command '{commandName}' from {player.Nickname}.");
     }
 
     private void OnPlayerJoined(PlayerJoinedEventArgs ev)
@@ -3700,11 +3702,13 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             {
                 _limitedRemoteAdminOriginalState[player.PlayerId] = new LimitedRemoteAdminState(
                     GetServerRolePermissions(serverRoles),
-                    GetRemoteAdminFlag(serverRoles));
+                    GetRemoteAdminFlag(serverRoles),
+                    player.ReferenceHub.queryProcessor.GameplayData);
             }
 
             PermissionsField.SetValue(serverRoles, LimitedRemoteAdminCommandSender.WarmupPermissions);
             RemoteAdminFlagField?.SetValue(serverRoles, true);
+            player.ReferenceHub.queryProcessor.GameplayData = true;
             failureReason = string.Empty;
             return true;
         }
@@ -3864,11 +3868,13 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             {
                 PermissionsField?.SetValue(serverRoles, state.Permissions);
                 RemoteAdminFlagField?.SetValue(serverRoles, state.RemoteAdmin);
+                player.ReferenceHub.queryProcessor.GameplayData = state.GameplayData;
             }
             else
             {
                 PermissionsField?.SetValue(serverRoles, 0UL);
                 RemoteAdminFlagField?.SetValue(serverRoles, false);
+                player.ReferenceHub.queryProcessor.GameplayData = false;
             }
         }
         finally
@@ -4720,15 +4726,18 @@ internal sealed class AutoCleanupCommandSender : ICommandSender
 
 internal readonly struct LimitedRemoteAdminState
 {
-    public LimitedRemoteAdminState(ulong permissions, bool remoteAdmin)
+    public LimitedRemoteAdminState(ulong permissions, bool remoteAdmin, bool gameplayData)
     {
         Permissions = permissions;
         RemoteAdmin = remoteAdmin;
+        GameplayData = gameplayData;
     }
 
     public ulong Permissions { get; }
 
     public bool RemoteAdmin { get; }
+
+    public bool GameplayData { get; }
 }
 
 internal sealed class LimitedRemoteAdminCommandSender : RemoteAdmin.PlayerCommandSender
@@ -4738,6 +4747,7 @@ internal sealed class LimitedRemoteAdminCommandSender : RemoteAdmin.PlayerComman
         | (ulong)PlayerPermissions.ForceclassToSpectator
         | (ulong)PlayerPermissions.ForceclassWithoutRestrictions
         | (ulong)PlayerPermissions.GivingItems
+        | (ulong)PlayerPermissions.GameplayData
         | (ulong)PlayerPermissions.PlayersManagement;
 
     private readonly RemoteAdmin.PlayerCommandSender _inner;
