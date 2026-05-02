@@ -20,11 +20,11 @@ auto_cleanup_interval_seconds: 180
 player_bot_count_global_cooldown_seconds: 60
 player_bot_count_cooldown_seconds: 180
 player_bot_count_cooldown_jitter_seconds: 60
-limited_remote_admin_enabled: true
-limited_remote_admin_use_window_seconds: 20
-limited_remote_admin_global_cooldown_seconds: 60
-limited_remote_admin_cooldown_seconds: 180
-limited_remote_admin_cooldown_jitter_seconds: 60
+player_panel_enabled: true
+player_panel_use_window_seconds: 20
+player_panel_global_cooldown_seconds: 60
+player_panel_cooldown_seconds: 180
+player_panel_cooldown_jitter_seconds: 60
 bot_count: 6
 max_bot_count: 30
 reset_bot_count_when_no_active_players: true

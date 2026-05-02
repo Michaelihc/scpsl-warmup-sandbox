@@ -51,15 +51,15 @@ public sealed class PluginConfig
 
     public int PlayerBotCountCooldownJitterSeconds { get; set; } = 60;
 
-    public bool LimitedRemoteAdminEnabled { get; set; } = true;
+    public bool PlayerPanelEnabled { get; set; } = true;
 
-    public int LimitedRemoteAdminUseWindowSeconds { get; set; } = 20;
+    public int PlayerPanelUseWindowSeconds { get; set; } = 20;
 
-    public int LimitedRemoteAdminGlobalCooldownSeconds { get; set; } = 60;
+    public int PlayerPanelGlobalCooldownSeconds { get; set; } = 60;
 
-    public int LimitedRemoteAdminCooldownSeconds { get; set; } = 180;
+    public int PlayerPanelCooldownSeconds { get; set; } = 180;
 
-    public int LimitedRemoteAdminCooldownJitterSeconds { get; set; } = 60;
+    public int PlayerPanelCooldownJitterSeconds { get; set; } = 60;
 
     public int BotCount { get; set; } = 6;
 

@@ -7,15 +7,15 @@ namespace ScpslPluginStarter;
 
 [CommandHandler(typeof(GameConsoleCommandHandler))]
 [CommandHandler(typeof(ClientCommandHandler))]
-public sealed class LimitedRemoteAdminCommand : ICommand
+public sealed class PlayerPanelCommand : ICommand
 {
-    public string Command => "ra";
+    public string Command => "panel";
 
-    public string[] Aliases => new[] { "panel", "adminpanel" };
+    public string[] Aliases => new[] { "adminpanel", "menu" };
 
     public string Description => WarmupLocalization.T(
-        "Opens the limited warmup Remote Admin panel.",
-        "打开热身插件的受限 Remote Admin 面板。");
+        "Opens and uses the warmup player command panel.",
+        "打开并使用热身玩家指令面板。");
 
     public bool Execute(ArraySegment<string> arguments, ICommandSender sender, out string response)
     {
@@ -32,6 +32,11 @@ public sealed class LimitedRemoteAdminCommand : ICommand
             return false;
         }
 
-        return plugin.TryOpenLimitedRemoteAdmin(player, out response);
+        if (arguments.Count == 0)
+        {
+            return plugin.TryOpenPlayerPanel(player, out response);
+        }
+
+        return plugin.TryExecutePlayerPanelCommand(player, arguments, out response);
     }
 }

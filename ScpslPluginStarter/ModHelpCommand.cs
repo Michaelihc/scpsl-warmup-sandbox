@@ -25,14 +25,14 @@ public sealed class ModHelpCommand : ICommand
             ".loadout <number|name> - choose human preset\n" +
             ".loadout <173|939|106|049|3114|096> - temporary SCP practice role\n" +
             ".bots setcount <count> - change bot count with cooldown\n" +
-            ".ra - 20s limited RA panel: forcerole, bring, goto, give only\n" +
+            ".panel - 20s player panel: role, give, bring, goto, bots\n" +
             "Admin-only extras: bots start/restart/stop/save/map/difficulty/aimode/language/set <key> <value>",
             "热身命令：\n" +
             ".loadout - 查看人类预设\n" +
             ".loadout <编号|名称> - 选择人类预设\n" +
             ".loadout <173|939|106|049|3114|096> - 临时切换为 SCP 练习角色\n" +
             ".bots setcount <数量> - 带冷却修改机器人数量\n" +
-            ".ra - 打开 20 秒受限 RA 面板：仅 forcerole、bring、goto、give\n" +
+            ".panel - 打开 20 秒玩家面板：role、give、bring、goto、bots\n" +
             "管理员额外命令：bots start/restart/stop/save/map/difficulty/aimode/language/set <键> <值>");
         return true;
     }

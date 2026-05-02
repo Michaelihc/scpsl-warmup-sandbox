@@ -21,7 +21,6 @@ using Mirror;
 using NetworkManagerUtils.Dummies;
 using NorthwoodLib;
 using PlayerRoles;
-using RemoteAdmin.Communication;
 using UnityEngine;
 using UnityEngine.AI;
 using ApiLogger = LabApi.Features.Console.Logger;
@@ -60,26 +59,11 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             null,
             new[] { typeof(ReferenceHub), typeof(ItemType), typeof(uint) },
             null);
-    private static readonly MethodInfo? OpenRemoteAdminMethod = typeof(ServerRoles)
-        .GetMethod("OpenRemoteAdmin", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-    private static readonly MethodInfo? TargetSetRemoteAdminMethod = typeof(ServerRoles)
-        .GetMethod(
-            "TargetSetRemoteAdmin",
-            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
-            null,
-            new[] { typeof(bool) },
-            null);
-    private static readonly FieldInfo? RemoteAdminFlagField = typeof(ServerRoles)
-        .GetField("RemoteAdmin", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-    private static readonly FieldInfo? PermissionsField = typeof(ServerRoles)
-        .GetField("Permissions", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-
     private readonly Dictionary<int, ManagedBotState> _managedBots = new();
     private readonly Dictionary<int, string> _selectedHumanLoadouts = new();
     private readonly Dictionary<int, long> _playerBotCountCooldownUntilMs = new();
-    private readonly Dictionary<int, long> _limitedRemoteAdminCooldownUntilMs = new();
-    private readonly Dictionary<int, long> _limitedRemoteAdminWindowUntilMs = new();
-    private readonly Dictionary<int, LimitedRemoteAdminState> _limitedRemoteAdminOriginalState = new();
+    private readonly Dictionary<int, long> _playerPanelCooldownUntilMs = new();
+    private readonly Dictionary<int, long> _playerPanelWindowUntilMs = new();
     private readonly System.Random _random = new();
     private readonly HumanPresetService _humanPresetService = new();
     private readonly BotCombatService _botCombatService = new();
@@ -93,7 +77,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private int _warmupGeneration;
     private int _roundCampDisabledUntilTick;
     private long _playerBotCountGlobalCooldownUntilMs;
-    private long _limitedRemoteAdminGlobalCooldownUntilMs;
+    private long _playerPanelGlobalCooldownUntilMs;
     private bool _warmupActive;
 
     public static WarmupSandboxPlugin? Instance { get; private set; }
@@ -113,7 +97,6 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         ServerEvents.RoundStarted += OnRoundStarted;
         ServerEvents.RoundRestarted += OnRoundRestarted;
         ServerEvents.RoundEndingConditionsCheck += OnRoundEndingConditionsCheck;
-        ServerEvents.CommandExecuting += OnCommandExecuting;
         PlayerEvents.Joined += OnPlayerJoined;
         PlayerEvents.Spawned += OnPlayerSpawned;
         PlayerEvents.Death += OnPlayerDeath;
@@ -167,7 +150,6 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         PlayerEvents.Spawned -= OnPlayerSpawned;
         PlayerEvents.Joined -= OnPlayerJoined;
         ServerEvents.RoundEndingConditionsCheck -= OnRoundEndingConditionsCheck;
-        ServerEvents.CommandExecuting -= OnCommandExecuting;
         ServerEvents.RoundRestarted -= OnRoundRestarted;
         ServerEvents.RoundStarted -= OnRoundStarted;
         ServerEvents.WaitingForPlayers -= OnWaitingForPlayers;
@@ -208,53 +190,6 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         {
             ev.CanEnd = false;
         }
-    }
-
-    private void OnCommandExecuting(CommandExecutingEventArgs ev)
-    {
-        if (ev.CommandType != CommandType.RemoteAdmin
-            || ev.Sender == null
-            || ev.Command == null
-            || !Player.TryGet(ev.Sender, out Player player))
-        {
-            return;
-        }
-
-        bool isLimitedWindow = IsLimitedRemoteAdminWindowActive(player.PlayerId);
-        if (!isLimitedWindow && (IsPrivilegedCommandSender(ev.Sender) || HasNativeRemoteAdminAccess(player)))
-        {
-            return;
-        }
-
-        string commandName = ev.CommandName.ToLowerInvariant();
-        if (!IsLimitedRemoteAdminCommandAllowed(commandName))
-        {
-            ev.IsAllowed = false;
-            ApiLogger.Info($"[WarmupSandbox] Limited RA blocked command '{commandName}' from {player.Nickname}.");
-            ev.Sender.RaReply(WarmupLocalization.T(
-                "Warmup limited RA only allows: forcerole, bring, goto, give. Use .help for help.",
-                "热身受限 RA 只允许：forcerole、bring、goto、give。输入 .help 查看帮助。"), false, true, string.Empty);
-            return;
-        }
-
-        if (!TryUseLimitedRemoteAdminWindow(player, out string response))
-        {
-            ev.IsAllowed = false;
-            ev.Sender.RaReply(response, false, true, string.Empty);
-            return;
-        }
-
-        if (ev.Sender is not RemoteAdmin.PlayerCommandSender playerCommandSender)
-        {
-            ev.IsAllowed = false;
-            ev.Sender.RaReply(WarmupLocalization.T(
-                "Limited RA is only available from the player Remote Admin panel.",
-                "受限 RA 只能从玩家 Remote Admin 面板使用。"), false, true, string.Empty);
-            return;
-        }
-
-        ev.Sender = new LimitedRemoteAdminCommandSender(playerCommandSender);
-        ApiLogger.Info($"[WarmupSandbox] Limited RA allowed command '{commandName}' from {player.Nickname}.");
     }
 
     private void OnPlayerJoined(PlayerJoinedEventArgs ev)
@@ -412,9 +347,8 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     {
         _selectedHumanLoadouts.Remove(ev.Player.PlayerId);
         _playerBotCountCooldownUntilMs.Remove(ev.Player.PlayerId);
-        _limitedRemoteAdminCooldownUntilMs.Remove(ev.Player.PlayerId);
-        _limitedRemoteAdminWindowUntilMs.Remove(ev.Player.PlayerId);
-        _limitedRemoteAdminOriginalState.Remove(ev.Player.PlayerId);
+        _playerPanelCooldownUntilMs.Remove(ev.Player.PlayerId);
+        _playerPanelWindowUntilMs.Remove(ev.Player.PlayerId);
 
         if (RemoveManagedBot(ev.Player.PlayerId))
         {
@@ -2662,8 +2596,8 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
 
         string text = WarmupLocalization.T(
-            "<size=28><color=#00ffff><b>Use .help for commands</b></color></size>\n<size=22>.loadout / .bots setcount / .ra limited panel</size>",
-            "<size=28><color=#00ffff><b>输入 .help 查看命令</b></color></size>\n<size=22>.loadout / .bots setcount / .ra 受限面板</size>");
+            "<size=28><color=#00ffff><b>Use .help for commands</b></color></size>\n<size=22>.loadout / .bots setcount / .panel</size>",
+            "<size=28><color=#00ffff><b>输入 .help 查看命令</b></color></size>\n<size=22>.loadout / .bots setcount / .panel 面板</size>");
 
         foreach (Player player in Player.List.Where(IsManagedHuman))
         {
@@ -2761,23 +2695,6 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private static bool IsPrivilegedCommandSender(CommandSender sender)
     {
         return sender.FullPermissions || sender.Permissions != 0UL;
-    }
-
-    private static bool IsLimitedRemoteAdminCommandAllowed(string commandName)
-    {
-        switch (commandName.ToLowerInvariant())
-        {
-            case "forcerole":
-            case "forceclass":
-            case "fr":
-            case "fc":
-            case "bring":
-            case "goto":
-            case "give":
-                return true;
-            default:
-                return false;
-        }
     }
 
     private void SchedulePostShotVerification(int playerId, int brainToken, int generation)
@@ -3568,319 +3485,436 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         return true;
     }
 
-    public bool TryOpenLimitedRemoteAdmin(Player player, out string response)
+    public bool TryOpenPlayerPanel(Player player, out string response)
     {
-        if (!IsLimitedRemoteAdminWindowActive(player.PlayerId) && HasNativeRemoteAdminAccess(player))
-        {
-            if (!TryOpenRemoteAdminPanel(player, out string failureReason))
-            {
-                response = WarmupLocalization.T(
-                    $"Failed to open Remote Admin: {failureReason}",
-                    $"打开 Remote Admin 失败：{failureReason}");
-                return false;
-            }
-
-            response = WarmupLocalization.T(
-                "Remote Admin opened with your normal admin permissions.",
-                "已使用你的正常管理员权限打开 Remote Admin。");
-            ScheduleRemoteAdminPlayerListRefresh(player);
-            return true;
-        }
-
-        if (!TryUseLimitedRemoteAdminWindow(player, out response))
-        {
-            return false;
-        }
-
-        try
-        {
-            if (!TryActivateLimitedRemoteAdminUi(player, out string activationFailure))
-            {
-                _limitedRemoteAdminWindowUntilMs.Remove(player.PlayerId);
-                response = WarmupLocalization.T(
-                    $"Failed to prepare limited Remote Admin: {activationFailure}",
-                    $"准备受限 Remote Admin 失败：{activationFailure}");
-                return false;
-            }
-
-            if (!TryOpenRemoteAdminPanel(player, out string failureReason))
-            {
-                _limitedRemoteAdminWindowUntilMs.Remove(player.PlayerId);
-                RestoreLimitedRemoteAdminUi(player.PlayerId);
-                response = WarmupLocalization.T(
-                    $"Failed to open limited Remote Admin: {failureReason}",
-                    $"打开受限 Remote Admin 失败：{failureReason}");
-                return false;
-            }
-
-            player.SendHint(WarmupLocalization.T(
-                "Limited RA enabled for 20s: forcerole, bring, goto, give only.",
-                "受限 RA 已开启 20 秒：仅允许 forcerole、bring、goto、give。"), 5f);
-            response = WarmupLocalization.T(
-                "Limited Remote Admin opened for 20 seconds.",
-                "受限 Remote Admin 已开启 20 秒。");
-            ScheduleRemoteAdminPlayerListRefresh(player);
-            return true;
-        }
-        catch (Exception exception)
-        {
-            _limitedRemoteAdminWindowUntilMs.Remove(player.PlayerId);
-            RestoreLimitedRemoteAdminUi(player.PlayerId);
-            response = WarmupLocalization.T(
-                $"Failed to open limited Remote Admin: {exception.Message}",
-                $"打开受限 Remote Admin 失败：{exception.Message}");
-            return false;
-        }
-    }
-
-    private static bool TryOpenRemoteAdminPanel(Player player, out string failureReason)
-    {
-        if (OpenRemoteAdminMethod == null)
-        {
-            failureReason = "OpenRemoteAdmin method was not found.";
-            return false;
-        }
-
-        try
-        {
-            OpenRemoteAdminMethod.Invoke(player.ReferenceHub.serverRoles, null);
-            failureReason = string.Empty;
-            return true;
-        }
-        catch (TargetInvocationException exception)
-        {
-            failureReason = exception.InnerException?.Message ?? exception.Message;
-            return false;
-        }
-        catch (Exception exception)
-        {
-            failureReason = exception.Message;
-            return false;
-        }
-    }
-
-    private void ScheduleRemoteAdminPlayerListRefresh(Player player)
-    {
-        int playerId = player.PlayerId;
-        Schedule(() => SendRemoteAdminPlayerList(playerId), 250);
-        Schedule(() => SendRemoteAdminPlayerList(playerId), 1250);
-    }
-
-    private void SendRemoteAdminPlayerList(int playerId)
-    {
-        if (!Player.TryGet(playerId, out Player player)
-            || player.IsDestroyed)
-        {
-            return;
-        }
-
-        try
-        {
-            RemoteAdmin.PlayerCommandSender sender = player.ReferenceHub.queryProcessor.TryGetSender(out RemoteAdmin.PlayerCommandSender querySender)
-                ? querySender
-                : new RemoteAdmin.PlayerCommandSender(player.ReferenceHub);
-            new RaPlayerList().ReceiveData(sender, "1 0 0");
-        }
-        catch (Exception exception)
-        {
-            ApiLogger.Warn($"[WarmupSandbox] Failed to refresh Remote Admin player list for {player.Nickname}: {exception.Message}");
-        }
-    }
-
-    private bool TryActivateLimitedRemoteAdminUi(Player player, out string failureReason)
-    {
-        if (PermissionsField == null)
-        {
-            failureReason = "ServerRoles.Permissions field was not found.";
-            return false;
-        }
-
-        try
-        {
-            ServerRoles serverRoles = player.ReferenceHub.serverRoles;
-            if (!_limitedRemoteAdminOriginalState.ContainsKey(player.PlayerId))
-            {
-                _limitedRemoteAdminOriginalState[player.PlayerId] = new LimitedRemoteAdminState(
-                    GetServerRolePermissions(serverRoles),
-                    GetRemoteAdminFlag(serverRoles),
-                    player.ReferenceHub.queryProcessor.GameplayData);
-            }
-
-            PermissionsField.SetValue(serverRoles, LimitedRemoteAdminCommandSender.WarmupPermissions);
-            RemoteAdminFlagField?.SetValue(serverRoles, true);
-            player.ReferenceHub.queryProcessor.GameplayData = true;
-            failureReason = string.Empty;
-            return true;
-        }
-        catch (Exception exception)
-        {
-            failureReason = exception.Message;
-            return false;
-        }
-    }
-
-    private bool IsLimitedRemoteAdminWindowActive(int playerId)
-    {
-        long now = NowMs();
-        return _limitedRemoteAdminWindowUntilMs.TryGetValue(playerId, out long windowUntil)
-            && windowUntil > now;
-    }
-
-    private static bool HasNativeRemoteAdminAccess(Player player)
-    {
-        ServerRoles serverRoles = player.ReferenceHub.serverRoles;
-        if (GetServerRolePermissions(serverRoles) != 0UL)
-        {
-            return true;
-        }
-
-        return serverRoles.Group?.Permissions != 0UL;
-    }
-
-    private static ulong GetServerRolePermissions(ServerRoles serverRoles)
-    {
-        try
-        {
-            return PermissionsField?.GetValue(serverRoles) is ulong permissions ? permissions : 0UL;
-        }
-        catch
-        {
-            return 0UL;
-        }
-    }
-
-    private static bool GetRemoteAdminFlag(ServerRoles serverRoles)
-    {
-        try
-        {
-            return RemoteAdminFlagField?.GetValue(serverRoles) is bool remoteAdmin && remoteAdmin;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private bool TryUseLimitedRemoteAdminWindow(Player player, out string response)
-    {
-        if (!Config.LimitedRemoteAdminEnabled)
+        if (!Config.PlayerPanelEnabled)
         {
             response = WarmupLocalization.T(
-                "Limited Remote Admin is disabled.",
-                "受限 Remote Admin 已禁用。");
+                "The player panel is disabled on this server.",
+                "本服务器已关闭玩家面板。");
             return false;
         }
 
         long now = NowMs();
-        if (_limitedRemoteAdminWindowUntilMs.TryGetValue(player.PlayerId, out long windowUntil)
-            && windowUntil > now)
+        if (_playerPanelWindowUntilMs.TryGetValue(player.PlayerId, out long activeUntil)
+            && activeUntil > now)
         {
-            response = WarmupLocalization.T(
-                $"Limited RA window active for {Math.Max(1, (int)Math.Ceiling((windowUntil - now) / 1000.0))}s.",
-                $"受限 RA 窗口还剩 {Math.Max(1, (int)Math.Ceiling((windowUntil - now) / 1000.0))} 秒。");
+            response = BuildPlayerPanel(player, activeUntil);
+            player.SendHint(response, 12f);
             return true;
         }
 
-        if (TryGetCooldownRemainingSeconds(_limitedRemoteAdminGlobalCooldownUntilMs, now, out int globalRemaining))
+        if (TryGetCooldownRemainingSeconds(_playerPanelGlobalCooldownUntilMs, now, out int globalRemaining))
         {
             response = WarmupLocalization.T(
-                $"Limited RA is on global cooldown for {globalRemaining}s.",
-                $"受限 RA 全局冷却中，还剩 {globalRemaining} 秒。");
+                $"The player panel is on global cooldown for {globalRemaining}s.",
+                $"玩家面板全局冷却中，还剩 {globalRemaining} 秒。");
             return false;
         }
 
-        if (_limitedRemoteAdminCooldownUntilMs.TryGetValue(player.PlayerId, out long playerCooldownUntil)
+        if (_playerPanelCooldownUntilMs.TryGetValue(player.PlayerId, out long playerCooldownUntil)
             && TryGetCooldownRemainingSeconds(playerCooldownUntil, now, out int playerRemaining))
         {
             response = WarmupLocalization.T(
-                $"You can use limited RA again in {playerRemaining}s.",
-                $"你还需要 {playerRemaining} 秒后才能再次使用受限 RA。");
+                $"You can open the player panel again in {playerRemaining}s.",
+                $"你还需要 {playerRemaining} 秒后才能再次打开玩家面板。");
             return false;
         }
 
-        long newWindowUntil = now + Math.Max(1, Config.LimitedRemoteAdminUseWindowSeconds) * 1000L;
-        _limitedRemoteAdminWindowUntilMs[player.PlayerId] = newWindowUntil;
-        ScheduleLimitedRemoteAdminCooldown(player.PlayerId, newWindowUntil);
-        response = WarmupLocalization.T(
-            "Limited RA window started.",
-            "受限 RA 窗口已开始。");
+        long windowUntil = now + Math.Max(1, Config.PlayerPanelUseWindowSeconds) * 1000L;
+        _playerPanelWindowUntilMs[player.PlayerId] = windowUntil;
+        SchedulePlayerPanelCooldown(player.PlayerId, windowUntil);
+        response = BuildPlayerPanel(player, windowUntil);
+        player.SendHint(response, Math.Min(15f, Math.Max(4f, Config.PlayerPanelUseWindowSeconds)));
+        ApiLogger.Info($"[WarmupSandbox] Player panel opened for {player.Nickname}#{player.PlayerId}.");
         return true;
     }
 
-    private void ScheduleLimitedRemoteAdminCooldown(int playerId, long windowUntilMs)
+    public bool TryExecutePlayerPanelCommand(Player player, ArraySegment<string> arguments, out string response)
     {
-        int delayMs = (int)Math.Min(int.MaxValue, Math.Max(1000L, windowUntilMs - NowMs()));
+        if (arguments.Count == 0)
+        {
+            return TryOpenPlayerPanel(player, out response);
+        }
+
+        string subcommand = GetArgument(arguments, 0).ToLowerInvariant();
+        if (subcommand is "help" or "?")
+        {
+            response = BuildPlayerPanel(player, NowMs() + 1000L);
+            player.SendHint(response, 12f);
+            return true;
+        }
+
+        if (!IsPlayerPanelWindowActive(player.PlayerId))
+        {
+            response = WarmupLocalization.T(
+                "Use .panel first to open a 20s command window.",
+                "请先输入 .panel 打开 20 秒指令窗口。");
+            return false;
+        }
+
+        switch (subcommand)
+        {
+            case "role":
+            case "setrole":
+            case "forcerole":
+                if (arguments.Count < 3)
+                {
+                    response = WarmupLocalization.T(
+                        "Usage: .panel role <playerId|name|me> <role>",
+                        "用法：.panel role <玩家ID|名字|me> <职业>");
+                    return false;
+                }
+
+                if (!TryResolvePanelTarget(player, GetArgument(arguments, 1), out Player? roleTarget, out response)
+                    || roleTarget == null)
+                {
+                    return false;
+                }
+
+                if (!TryParsePanelRole(GetArgument(arguments, 2), out RoleTypeId role))
+                {
+                    response = WarmupLocalization.T(
+                        "Unknown role. Try 173, 939, 106, 049, 3114, 096, ntf, guard, chaos, classd.",
+                        "未知职业。可用 173、939、106、049、3114、096、ntf、guard、chaos、classd。");
+                    return false;
+                }
+
+                return TryPanelSetRole(player, roleTarget, role, out response);
+
+            case "give":
+            case "item":
+                if (arguments.Count < 3)
+                {
+                    response = WarmupLocalization.T(
+                        "Usage: .panel give <playerId|name|me> <item>",
+                        "用法：.panel give <玩家ID|名字|me> <物品>");
+                    return false;
+                }
+
+                if (!TryResolvePanelTarget(player, GetArgument(arguments, 1), out Player? itemTarget, out response)
+                    || itemTarget == null)
+                {
+                    return false;
+                }
+
+                if (!TryParsePanelItem(GetArgument(arguments, 2), out ItemType itemType))
+                {
+                    response = WarmupLocalization.T(
+                        "Unknown item. Try fsp9, com15, crossvec, e11, ak, medkit, ammo9, ammo556.",
+                        "未知物品。可用 fsp9、com15、crossvec、e11、ak、medkit、ammo9、ammo556。");
+                    return false;
+                }
+
+                return TryPanelGive(player, itemTarget, itemType, out response);
+
+            case "bring":
+                if (arguments.Count < 2)
+                {
+                    response = WarmupLocalization.T(
+                        "Usage: .panel bring <playerId|name>",
+                        "用法：.panel bring <玩家ID|名字>");
+                    return false;
+                }
+
+                if (!TryResolvePanelTarget(player, GetArgument(arguments, 1), out Player? bringTarget, out response)
+                    || bringTarget == null)
+                {
+                    return false;
+                }
+
+                return TryPanelBring(player, bringTarget, out response);
+
+            case "goto":
+            case "to":
+                if (arguments.Count < 2)
+                {
+                    response = WarmupLocalization.T(
+                        "Usage: .panel goto <playerId|name>",
+                        "用法：.panel goto <玩家ID|名字>");
+                    return false;
+                }
+
+                if (!TryResolvePanelTarget(player, GetArgument(arguments, 1), out Player? gotoTarget, out response)
+                    || gotoTarget == null)
+                {
+                    return false;
+                }
+
+                return TryPanelGoto(player, gotoTarget, out response);
+
+            case "bots":
+            case "setcount":
+                if (arguments.Count < 2)
+                {
+                    response = WarmupLocalization.T(
+                        "Usage: .panel bots <count>",
+                        "用法：.panel bots <数量>");
+                    return false;
+                }
+
+                return TryPlayerSetBotCount(player, GetArgument(arguments, 1), out response);
+
+            default:
+                response = BuildPlayerPanel(
+                    player,
+                    _playerPanelWindowUntilMs.TryGetValue(player.PlayerId, out long panelUntil) ? panelUntil : NowMs());
+                player.SendHint(response, 12f);
+                return false;
+        }
+    }
+
+    private string BuildPlayerPanel(Player player, long windowUntilMs)
+    {
+        int remainingSeconds = Math.Max(0, (int)Math.Ceiling((windowUntilMs - NowMs()) / 1000.0));
+        string playerRows = string.Join("\n", Player.List
+            .Where(candidate => candidate != null && !candidate.IsDestroyed)
+            .OrderBy(candidate => candidate.PlayerId)
+            .Take(12)
+            .Select(candidate => $"#{candidate.PlayerId} {candidate.Nickname} [{candidate.Role}]"));
+
+        if (string.IsNullOrWhiteSpace(playerRows))
+        {
+            playerRows = WarmupLocalization.T("No players found.", "未找到玩家。");
+        }
+
+        return WarmupLocalization.T(
+            $"<size=28><color=#00ffff><b>Warmup Panel</b></color></size>\n" +
+            $"<size=20><color=#cccccc>{remainingSeconds}s window. Type in console:</color></size>\n" +
+            "<align=left><size=18>" +
+            "<color=#ffd166>.panel role <id|me> <173|939|106|049|3114|096|ntf></color>\n" +
+            "<color=#ffd166>.panel give <id|me> <fsp9|com15|crossvec|e11|ak|medkit|ammo9></color>\n" +
+            "<color=#ffd166>.panel bring <id> / .panel goto <id> / .panel bots <count></color>\n" +
+            "<color=#bbbbbb>Players:</color>\n" +
+            $"{playerRows}</size></align>",
+            $"<size=28><color=#00ffff><b>玩家面板</b></color></size>\n" +
+            $"<size=20><color=#cccccc>窗口剩余 {remainingSeconds} 秒。在控制台输入：</color></size>\n" +
+            "<align=left><size=18>" +
+            "<color=#ffd166>.panel role <id|me> <173|939|106|049|3114|096|ntf></color>\n" +
+            "<color=#ffd166>.panel give <id|me> <fsp9|com15|crossvec|e11|ak|medkit|ammo9></color>\n" +
+            "<color=#ffd166>.panel bring <id> / .panel goto <id> / .panel bots <数量></color>\n" +
+            "<color=#bbbbbb>玩家列表：</color>\n" +
+            $"{playerRows}</size></align>");
+    }
+
+    private bool TryResolvePanelTarget(Player actor, string selector, out Player? target, out string response)
+    {
+        target = null;
+        string normalized = selector.Trim();
+        if (normalized.Equals("me", StringComparison.OrdinalIgnoreCase)
+            || normalized.Equals("self", StringComparison.OrdinalIgnoreCase))
+        {
+            target = actor;
+            response = string.Empty;
+            return true;
+        }
+
+        if (int.TryParse(normalized.TrimStart('#'), out int playerId)
+            && Player.TryGet(playerId, out Player idMatch)
+            && idMatch != null
+            && !idMatch.IsDestroyed)
+        {
+            target = idMatch;
+            response = string.Empty;
+            return true;
+        }
+
+        List<Player> matches = Player.List
+            .Where(candidate => candidate != null
+                && !candidate.IsDestroyed
+                && candidate.Nickname.Contains(normalized, StringComparison.OrdinalIgnoreCase))
+            .Take(3)
+            .ToList();
+
+        if (matches.Count == 1)
+        {
+            target = matches[0];
+            response = string.Empty;
+            return true;
+        }
+
+        response = matches.Count == 0
+            ? WarmupLocalization.T("Player not found.", "未找到玩家。")
+            : WarmupLocalization.T(
+                "Multiple players matched. Use the numeric player ID from .panel.",
+                "匹配到多个玩家。请使用 .panel 显示的数字玩家 ID。");
+        return false;
+    }
+
+    private static string GetArgument(ArraySegment<string> arguments, int index)
+    {
+        return arguments.Array![arguments.Offset + index]!;
+    }
+
+    private static bool TryParsePanelRole(string selector, out RoleTypeId role)
+    {
+        string normalized = selector.Trim().ToLowerInvariant().Replace("-", string.Empty).Replace("_", string.Empty);
+        role = normalized switch
+        {
+            "173" or "scp173" => RoleTypeId.Scp173,
+            "939" or "scp939" => RoleTypeId.Scp939,
+            "106" or "scp106" => RoleTypeId.Scp106,
+            "049" or "scp049" => RoleTypeId.Scp049,
+            "3114" or "scp3114" => RoleTypeId.Scp3114,
+            "096" or "scp096" => RoleTypeId.Scp096,
+            "ntf" or "mtf" or "private" => RoleTypeId.NtfPrivate,
+            "guard" => RoleTypeId.FacilityGuard,
+            "chaos" or "ci" => RoleTypeId.ChaosConscript,
+            "classd" or "dclass" => RoleTypeId.ClassD,
+            "scientist" or "sci" => RoleTypeId.Scientist,
+            _ => RoleTypeId.None,
+        };
+
+        return role != RoleTypeId.None || Enum.TryParse(selector, ignoreCase: true, out role);
+    }
+
+    private static bool TryParsePanelItem(string selector, out ItemType itemType)
+    {
+        string normalized = selector.Trim().ToLowerInvariant().Replace("-", string.Empty).Replace("_", string.Empty);
+        itemType = normalized switch
+        {
+            "fsp9" => ItemType.GunFSP9,
+            "com15" => ItemType.GunCOM15,
+            "com18" => ItemType.GunCOM18,
+            "revolver" => ItemType.GunRevolver,
+            "crossvec" or "vec" or "smg" => ItemType.GunCrossvec,
+            "e11" or "e11sr" => ItemType.GunE11SR,
+            "ak" or "ak47" => ItemType.GunAK,
+            "logicer" => ItemType.GunLogicer,
+            "shotgun" => ItemType.GunShotgun,
+            "medkit" or "med" => ItemType.Medkit,
+            "painkiller" or "painkillers" => ItemType.Painkillers,
+            "flash" or "flashbang" => ItemType.GrenadeFlash,
+            "grenade" or "frag" => ItemType.GrenadeHE,
+            "armor" or "combatarmor" => ItemType.ArmorCombat,
+            "ammo9" or "9mm" or "ammo9x19" => ItemType.Ammo9x19,
+            "ammo556" or "556" or "ammo556x45" => ItemType.Ammo556x45,
+            "ammo762" or "762" or "ammo762x39" => ItemType.Ammo762x39,
+            "ammo12" or "12gauge" or "ammo12gauge" => ItemType.Ammo12gauge,
+            "ammo44" or "44" or "ammo44cal" => ItemType.Ammo44cal,
+            _ => ItemType.None,
+        };
+
+        return itemType != ItemType.None || Enum.TryParse(selector, ignoreCase: true, out itemType);
+    }
+
+    private bool TryPanelSetRole(Player actor, Player target, RoleTypeId role, out string response)
+    {
+        Vector3 position = target.Position;
+        Vector2 lookRotation = target.LookRotation;
+        target.SetRole(role, RoleChangeReason.RemoteAdmin, RoleSpawnFlags.All);
+        RestorePanelRolePosition(target.PlayerId, role, position, lookRotation, 50);
+        RestorePanelRolePosition(target.PlayerId, role, position, lookRotation, 250);
+        response = WarmupLocalization.T(
+            $"Set {target.Nickname} to {role} in place.",
+            $"已将 {target.Nickname} 原地设置为 {role}。");
+        actor.SendHint(response, 4f);
+        ApiLogger.Info($"[WarmupSandbox] Player panel role actor={actor.Nickname}#{actor.PlayerId} target={target.Nickname}#{target.PlayerId} role={role}");
+        return true;
+    }
+
+    private void RestorePanelRolePosition(int playerId, RoleTypeId role, Vector3 position, Vector2 lookRotation, int delayMs)
+    {
         Schedule(() =>
         {
-            if (!_limitedRemoteAdminWindowUntilMs.TryGetValue(playerId, out long currentWindowUntil)
+            if (!Player.TryGet(playerId, out Player livePlayer)
+                || livePlayer.IsDestroyed
+                || livePlayer.Role != role)
+            {
+                return;
+            }
+
+            livePlayer.Position = position;
+            livePlayer.LookRotation = lookRotation;
+        }, delayMs);
+    }
+
+    private bool TryPanelGive(Player actor, Player target, ItemType itemType, out string response)
+    {
+        if (IsAmmoType(itemType))
+        {
+            ushort current = target.GetAmmo(itemType);
+            ushort next = (ushort)Math.Min(ushort.MaxValue, current + 120);
+            target.SetAmmo(itemType, next);
+            response = WarmupLocalization.T(
+                $"Gave {target.Nickname} {itemType}: {current}->{next}.",
+                $"已给 {target.Nickname} {itemType}：{current}->{next}。");
+        }
+        else
+        {
+            target.AddItem(itemType, ItemAddReason.AdminCommand);
+            response = WarmupLocalization.T(
+                $"Gave {target.Nickname} {itemType}.",
+                $"已给 {target.Nickname} {itemType}。");
+        }
+
+        actor.SendHint(response, 4f);
+        ApiLogger.Info($"[WarmupSandbox] Player panel give actor={actor.Nickname}#{actor.PlayerId} target={target.Nickname}#{target.PlayerId} item={itemType}");
+        return true;
+    }
+
+    private static bool IsAmmoType(ItemType itemType)
+    {
+        return itemType is ItemType.Ammo9x19
+            or ItemType.Ammo556x45
+            or ItemType.Ammo762x39
+            or ItemType.Ammo12gauge
+            or ItemType.Ammo44cal;
+    }
+
+    private bool TryPanelBring(Player actor, Player target, out string response)
+    {
+        target.Position = actor.Position + GetForwardOrDefault(actor);
+        response = WarmupLocalization.T(
+            $"Brought {target.Nickname}.",
+            $"已传送 {target.Nickname} 到你身边。");
+        actor.SendHint(response, 4f);
+        ApiLogger.Info($"[WarmupSandbox] Player panel bring actor={actor.Nickname}#{actor.PlayerId} target={target.Nickname}#{target.PlayerId}");
+        return true;
+    }
+
+    private bool TryPanelGoto(Player actor, Player target, out string response)
+    {
+        actor.Position = target.Position + GetForwardOrDefault(target);
+        response = WarmupLocalization.T(
+            $"Teleported to {target.Nickname}.",
+            $"已传送到 {target.Nickname}。");
+        actor.SendHint(response, 4f);
+        ApiLogger.Info($"[WarmupSandbox] Player panel goto actor={actor.Nickname}#{actor.PlayerId} target={target.Nickname}#{target.PlayerId}");
+        return true;
+    }
+
+    private static Vector3 GetForwardOrDefault(Player player)
+    {
+        return player.GameObject == null ? Vector3.forward : player.GameObject.transform.forward;
+    }
+
+    private bool IsPlayerPanelWindowActive(int playerId)
+    {
+        long now = NowMs();
+        return _playerPanelWindowUntilMs.TryGetValue(playerId, out long windowUntil)
+            && windowUntil > now;
+    }
+
+    private void SchedulePlayerPanelCooldown(int playerId, long windowUntilMs)
+    {
+        int delayMs = Math.Max(1, (int)Math.Min(int.MaxValue, windowUntilMs - NowMs()));
+        Schedule(() =>
+        {
+            if (!_playerPanelWindowUntilMs.TryGetValue(playerId, out long currentWindowUntil)
                 || currentWindowUntil != windowUntilMs)
             {
                 return;
             }
 
+            _playerPanelWindowUntilMs.Remove(playerId);
             long now = NowMs();
-            _limitedRemoteAdminWindowUntilMs.Remove(playerId);
-            CloseRemoteAdminPanel(playerId);
-            _limitedRemoteAdminGlobalCooldownUntilMs = now + Math.Max(0, Config.LimitedRemoteAdminGlobalCooldownSeconds) * 1000L;
-            double cooldownScale = Math.Max(1, Config.LimitedRemoteAdminUseWindowSeconds) / 20.0;
-            int scaledCooldownSeconds = (int)Math.Ceiling(Math.Max(0, Config.LimitedRemoteAdminCooldownSeconds) * cooldownScale);
-            int scaledJitterSeconds = (int)Math.Ceiling(Math.Max(0, Config.LimitedRemoteAdminCooldownJitterSeconds) * cooldownScale);
-            _limitedRemoteAdminCooldownUntilMs[playerId] = now + BuildCooldownMs(
-                scaledCooldownSeconds,
-                scaledJitterSeconds);
+            _playerPanelGlobalCooldownUntilMs = now + Math.Max(0, Config.PlayerPanelGlobalCooldownSeconds) * 1000L;
+            double cooldownScale = Math.Max(1, Config.PlayerPanelUseWindowSeconds) / 20.0;
+            int scaledCooldownSeconds = (int)Math.Ceiling(Math.Max(0, Config.PlayerPanelCooldownSeconds) * cooldownScale);
+            int scaledJitterSeconds = (int)Math.Ceiling(Math.Max(0, Config.PlayerPanelCooldownJitterSeconds) * cooldownScale);
+            _playerPanelCooldownUntilMs[playerId] = now + BuildCooldownMs(scaledCooldownSeconds, scaledJitterSeconds);
         }, delayMs);
-    }
-
-    private void CloseRemoteAdminPanel(int playerId)
-    {
-        if (!Player.TryGet(playerId, out Player player)
-            || player.IsDestroyed)
-        {
-            _limitedRemoteAdminOriginalState.Remove(playerId);
-            return;
-        }
-
-        try
-        {
-            ServerRoles serverRoles = player.ReferenceHub.serverRoles;
-            RestoreLimitedRemoteAdminUi(playerId);
-            TargetSetRemoteAdminMethod?.Invoke(serverRoles, new object[] { false });
-        }
-        catch (Exception exception)
-        {
-            ApiLogger.Warn($"[WarmupSandbox] Failed to close limited Remote Admin for {player.Nickname}: {exception.Message}");
-        }
-    }
-
-    private void RestoreLimitedRemoteAdminUi(int playerId)
-    {
-        if (!Player.TryGet(playerId, out Player player)
-            || player.IsDestroyed)
-        {
-            _limitedRemoteAdminOriginalState.Remove(playerId);
-            return;
-        }
-
-        try
-        {
-            ServerRoles serverRoles = player.ReferenceHub.serverRoles;
-            if (_limitedRemoteAdminOriginalState.TryGetValue(playerId, out LimitedRemoteAdminState state))
-            {
-                PermissionsField?.SetValue(serverRoles, state.Permissions);
-                RemoteAdminFlagField?.SetValue(serverRoles, state.RemoteAdmin);
-                player.ReferenceHub.queryProcessor.GameplayData = state.GameplayData;
-            }
-            else
-            {
-                PermissionsField?.SetValue(serverRoles, 0UL);
-                RemoteAdminFlagField?.SetValue(serverRoles, false);
-                player.ReferenceHub.queryProcessor.GameplayData = false;
-            }
-        }
-        finally
-        {
-            _limitedRemoteAdminOriginalState.Remove(playerId);
-        }
     }
 
     private long BuildCooldownMs(int seconds, int jitterSeconds)
@@ -4721,82 +4755,5 @@ internal sealed class AutoCleanupCommandSender : ICommandSender
 
     public void Respond(string message, bool success)
     {
-    }
-}
-
-internal readonly struct LimitedRemoteAdminState
-{
-    public LimitedRemoteAdminState(ulong permissions, bool remoteAdmin, bool gameplayData)
-    {
-        Permissions = permissions;
-        RemoteAdmin = remoteAdmin;
-        GameplayData = gameplayData;
-    }
-
-    public ulong Permissions { get; }
-
-    public bool RemoteAdmin { get; }
-
-    public bool GameplayData { get; }
-}
-
-internal sealed class LimitedRemoteAdminCommandSender : RemoteAdmin.PlayerCommandSender
-{
-    internal const ulong WarmupPermissions =
-        (ulong)PlayerPermissions.ForceclassSelf
-        | (ulong)PlayerPermissions.ForceclassToSpectator
-        | (ulong)PlayerPermissions.ForceclassWithoutRestrictions
-        | (ulong)PlayerPermissions.GivingItems
-        | (ulong)PlayerPermissions.GameplayData
-        | (ulong)PlayerPermissions.PlayersManagement;
-
-    private readonly RemoteAdmin.PlayerCommandSender _inner;
-
-    public LimitedRemoteAdminCommandSender(RemoteAdmin.PlayerCommandSender inner)
-        : base(inner.ReferenceHub)
-    {
-        _inner = inner;
-    }
-
-    public override string SenderId => _inner.SenderId;
-
-    public override string Nickname => _inner.Nickname;
-
-    public override ulong Permissions => WarmupPermissions;
-
-    public override byte KickPower => 0;
-
-    public override bool FullPermissions => false;
-
-    public override string LogName => $"Warmup limited RA/{_inner.LogName}";
-
-    public override bool Available()
-    {
-        return _inner.Available();
-    }
-
-    public override void Print(string text)
-    {
-        _inner.Print(text);
-    }
-
-    public override void Print(string text, ConsoleColor color)
-    {
-        _inner.Print(text, color);
-    }
-
-    public override void Print(string text, ConsoleColor consoleColor, Color unityColor)
-    {
-        _inner.Print(text, consoleColor, unityColor);
-    }
-
-    public override void RaReply(string text, bool success, bool logToConsole, string overrideDisplay)
-    {
-        _inner.RaReply(text, success, logToConsole, overrideDisplay);
-    }
-
-    public override void Respond(string message, bool success)
-    {
-        _inner.Respond(message, success);
     }
 }
