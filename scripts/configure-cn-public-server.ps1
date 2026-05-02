@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 if ([string]::IsNullOrWhiteSpace($ServerName)) {
-    $ServerName = "[CN] [" + [char]0x516C + [char]0x6D4B + "] " + [char]0x4EBA + [char]0x673A + [char]0x6218 + [char]0x6597 + [char]0x670D
+    $ServerName = "<color=#ff3333><b>[CN]</b></color> <color=#00ffff><b>[" + [char]0x516C + [char]0x6D4B + "]</b></color> <color=#ffff00><b>" + [char]0x4EBA + [char]0x673A + [char]0x6218 + [char]0x6597 + [char]0x670D + "</b></color>"
 }
 
 $configDir = Join-Path $env:APPDATA "SCP Secret Laboratory\config\$Port"

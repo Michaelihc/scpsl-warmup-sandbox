@@ -76,7 +76,7 @@ Use a non-default config port:
 scripts\host-warmup-server.bat --port 7778
 ```
 
-Configure the recommended Chinese public-test server name and 50-player cap:
+Configure the recommended Chinese public-test server name, colored server-list title, and 50-player cap:
 
 ```bat
 scripts\host-warmup-server.bat --configure-cn-public --start

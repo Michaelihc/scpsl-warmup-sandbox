@@ -15,7 +15,7 @@ public sealed class PlayerPanelCommand : ICommand
 
     public string Description => WarmupLocalization.T(
         "Opens and uses the warmup player command panel.",
-        "打开并使用热身玩家指令面板。");
+        "打开并使用热身玩家控制台。");
 
     public bool Execute(ArraySegment<string> arguments, ICommandSender sender, out string response)
     {

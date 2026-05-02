@@ -64,7 +64,8 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private const int PlayerPanelApplyBotRoleButtonId = 63024;
     private const int PlayerPanelApplyRetreatSpeedButtonId = 63025;
     private const int PlayerPanelLastSettingId = 63050;
-    private const int PlayerPanelPersonalCooldownSeconds = 10;
+    private const int PlayerPanelPersonalFreeActions = 3;
+    private const int PlayerPanelPersonalCooldownSeconds = 5;
     private const int PlayerPanelSelfTargetId = int.MinValue;
     private const int PlayerPanelAllBotsTargetId = int.MinValue + 1;
     private static readonly int[] BotAttachmentRandomizationDelaysMs = { 250, 1000, 2500 };
@@ -143,6 +144,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private readonly Dictionary<int, long> _playerPanelCooldownUntilMs = new();
     private readonly Dictionary<int, long> _playerPanelWindowUntilMs = new();
     private readonly Dictionary<int, long> _playerPanelPersonalCooldownUntilMs = new();
+    private readonly Dictionary<int, int> _playerPanelPersonalActionCounts = new();
     private readonly Dictionary<int, int> _playerPanelSelectedTargetIds = new();
     private readonly Dictionary<int, RoleTypeId> _playerPanelSelectedRoles = new();
     private readonly Dictionary<int, string> _playerPanelSelectedLoadouts = new();
@@ -455,6 +457,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         _playerPanelCooldownUntilMs.Remove(ev.Player.PlayerId);
         _playerPanelWindowUntilMs.Remove(ev.Player.PlayerId);
         _playerPanelPersonalCooldownUntilMs.Remove(ev.Player.PlayerId);
+        _playerPanelPersonalActionCounts.Remove(ev.Player.PlayerId);
         _playerPanelSelectedTargetIds.Remove(ev.Player.PlayerId);
         _playerPanelSelectedRoles.Remove(ev.Player.PlayerId);
         _playerPanelSelectedLoadouts.Remove(ev.Player.PlayerId);
@@ -2745,7 +2748,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
         string text = WarmupLocalization.T(
             "<size=28><color=#00ffff><b>Use .help for commands</b></color></size>\n<size=22>Open Server Specific Settings for the bot GUI</size>",
-            "<size=28><color=#00ffff><b>输入 .help 查看命令</b></color></size>\n<size=22>打开服务器专属设置（Server Specific Settings）使用人机面板</size>");
+            "<size=28><color=#00ffff><b>输入 .help 查看命令</b></color></size>\n<size=22>打开服务器专属设置（Server Specific Settings）使用人机控制台</size>");
 
         foreach (Player player in Player.List.Where(IsManagedHuman))
         {
@@ -3732,16 +3735,16 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         int defaultRetreatSpeed = Mathf.RoundToInt(ClampCloseRetreatSpeedScale(Config.BotBehavior.CloseRetreatSpeedScale) * 100f);
         ServerSpecificSettingBase[] pluginSettings =
         {
-            new SSGroupHeader(WarmupLocalization.T("Warmup Player Panel", "人机战斗面板"), false, WarmupLocalization.T("Use the sections below.", "使用下方选项。")),
+            new SSGroupHeader(WarmupLocalization.T("Warmup Player Panel", "人机战斗控制台"), false, WarmupLocalization.T("Use the sections below.", "使用下方选项。")),
             new SSTextArea(
                 null,
                 WarmupLocalization.T("How to use", "使用说明"),
                 SSTextArea.FoldoutMode.ExtendedByDefault,
                 WarmupLocalization.T(
-                    "Pick a value, then press Apply. Personal: 10s. Global: shared cooldown.",
-                    "先选数值，再点应用。个人 10 秒；全局共享冷却。"),
+                    "Pick a value, then press Apply. Personal: 3 free actions, then 5s. Global: shared cooldown.",
+                    "先选数值，再点应用。个人前 3 次无冷却，之后 5 秒；全局共享冷却。"),
                 TMPro.TextAlignmentOptions.Left),
-            new SSGroupHeader(WarmupLocalization.T("Personal Controls", "个人功能"), false, WarmupLocalization.T("10s cooldown.", "10 秒冷却。")),
+            new SSGroupHeader(WarmupLocalization.T("Personal Controls", "个人功能"), false, WarmupLocalization.T("First 3 actions are free, then 5s cooldown.", "前 3 次无冷却，之后 5 秒冷却。")),
             new SSDropdownSetting(PlayerPanelRoleSettingId, WarmupLocalization.T("My Role", "我的阵营"), PlayerPanelRoles.Select(role => role.ToString()).ToArray(), 0, SSDropdownSetting.DropdownEntryType.HybridLoop, WarmupLocalization.T("Set role. Spectators use the default spawnpoint.", "设置阵营。旁观者会使用默认出生点。"), 0, false),
             new SSButton(PlayerPanelSetRoleButtonId, WarmupLocalization.T("Apply My Role", "应用阵营"), WarmupLocalization.T("APPLY", "应用"), null, WarmupLocalization.T("Apply role.", "应用阵营。")),
             new SSDropdownSetting(PlayerPanelLoadoutSettingId, WarmupLocalization.T("My Loadout", "我的预设"), loadoutOptions, 0, SSDropdownSetting.DropdownEntryType.HybridLoop, WarmupLocalization.T("Loadout preset.", "预设。"), 0, false),
@@ -4134,7 +4137,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         {
             response = WarmupLocalization.T(
                 "The player panel is disabled on this server.",
-                "本服务器已关闭玩家面板。");
+                "本服务器已关闭玩家控制台。");
             return false;
         }
 
@@ -4312,8 +4315,8 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private string BuildPlayerPanel(Player player)
     {
         return WarmupLocalization.T(
-            "<size=28><color=#00ffff><b>Warmup GUI enabled</b></color></size>\n<size=20>Open <color=#ffd166>Server Specific Settings</color>. Personal Apply: 10s cooldown. Global Apply: staged server changes with shared cooldown.</size>",
-            "<size=28><color=#00ffff><b>人机面板已开启</b></color></size>\n<size=20>打开<color=#ffd166>服务器专属设置（Server Specific Settings）</color>。个人应用：10 秒冷却；全局应用：先选择再生效，使用共享冷却。</size>");
+            "<size=28><color=#00ffff><b>Warmup GUI enabled</b></color></size>\n<size=20>Open <color=#ffd166>Server Specific Settings</color>. Personal Apply: first 3 free, then 5s cooldown. Global Apply: staged server changes with shared cooldown.</size>",
+            "<size=28><color=#00ffff><b>人机控制台已开启</b></color></size>\n<size=20>打开<color=#ffd166>服务器专属设置（Server Specific Settings）</color>。个人应用：前 3 次无冷却，之后 5 秒；全局应用：先选择再生效，使用共享冷却。</size>");
     }
 
     private bool TryResolvePanelTarget(Player actor, string selector, out Player? target, out string response)
@@ -4665,16 +4668,35 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private bool TryUsePlayerPanelPersonalCooldown(Player player, out string response)
     {
         long now = NowMs();
-        if (_playerPanelPersonalCooldownUntilMs.TryGetValue(player.PlayerId, out long cooldownUntil)
-            && TryGetCooldownRemainingSeconds(cooldownUntil, now, out int remaining))
+        int playerId = player.PlayerId;
+        if (_playerPanelPersonalCooldownUntilMs.TryGetValue(playerId, out long cooldownUntil))
         {
-            response = WarmupLocalization.T(
-                $"Personal panel action cooldown: {remaining}s.",
-                $"个人面板操作冷却中：{remaining} 秒。");
-            return false;
+            if (TryGetCooldownRemainingSeconds(cooldownUntil, now, out int remaining))
+            {
+                response = WarmupLocalization.T(
+                    $"Personal console cooldown: {remaining}s.",
+                    $"个人控制台操作冷却中：{remaining} 秒。");
+                return false;
+            }
+
+            _playerPanelPersonalCooldownUntilMs.Remove(playerId);
+            _playerPanelPersonalActionCounts.Remove(playerId);
         }
 
-        _playerPanelPersonalCooldownUntilMs[player.PlayerId] = now + PlayerPanelPersonalCooldownSeconds * 1000L;
+        int actionCount = _playerPanelPersonalActionCounts.TryGetValue(playerId, out int previousCount)
+            ? previousCount + 1
+            : 1;
+
+        if (actionCount >= PlayerPanelPersonalFreeActions)
+        {
+            _playerPanelPersonalActionCounts.Remove(playerId);
+            _playerPanelPersonalCooldownUntilMs[playerId] = now + PlayerPanelPersonalCooldownSeconds * 1000L;
+        }
+        else
+        {
+            _playerPanelPersonalActionCounts[playerId] = actionCount;
+        }
+
         response = string.Empty;
         return true;
     }
@@ -4686,7 +4708,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         {
             response = WarmupLocalization.T(
                 $"Global panel action cooldown: {globalRemaining}s.",
-                $"全局面板操作冷却中：{globalRemaining} 秒。");
+                $"全局控制台操作冷却中：{globalRemaining} 秒。");
             return false;
         }
 

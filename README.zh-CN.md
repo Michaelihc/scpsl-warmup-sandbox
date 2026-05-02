@@ -93,8 +93,8 @@ scripts\host-warmup-server.bat --configure-cn-public --start
 推荐值：
 
 ```yaml
-server_name: [CN] [公测] 人机战斗服
-player_list_title: [CN] [公测] 人机战斗服
+server_name: <color=#ff3333><b>[CN]</b></color> <color=#00ffff><b>[公测]</b></color> <color=#ffff00><b>人机战斗服</b></color>
+player_list_title: <color=#ff3333><b>[CN]</b></color> <color=#00ffff><b>[公测]</b></color> <color=#ffff00><b>人机战斗服</b></color>
 max_players: 50
 ```
 
@@ -120,7 +120,7 @@ scripts\host-warmup-server.bat --configure-cn-public --server-info-id 你的Past
 
 - 这是人机练枪和热身服务器。
 - 服务器会自动生成机器人。
-- 所有玩家都可在服务器专属设置（Server Specific Settings）里使用人机面板，可临时切阵营、传送和发物品。
+- 所有玩家都可在服务器专属设置（Server Specific Settings）里使用人机控制台，可临时切阵营、传送和发物品。
 - 输入 `.help` 查看玩家命令。
 - 服务器仍在公测开发中。
 

@@ -1,17 +1,17 @@
-<size=125%><color=#00ffff><b>[CN] [公测] 人机战斗服</b></color></size>
-<color=#00ff88><b>所有玩家都可使用练习用受限面板。</b></color>
-<color=#ffcc00>仅支持刷物品、换角色和传送；每次 20 秒，有冷却，其他管理功能无效。</color>
+<size=125%><color=#ff3333><b>[CN]</b></color> <color=#00ffff><b>[公测]</b></color> <color=#ffff00><b>人机战斗服</b></color></size>
+<color=#00ff88><b>任何人都能使用练习控制台！</b></color>
+<color=#ffcc00>控制台只能刷物品、改变阵营和传送；有冷却限制，其他管理功能不会生效。</color>
 <color=#66ccff>也欢迎看看 Site02 社区服：180.188.21.98:65535</color>
 <color=#66ccff>联系方式：fsp9fromsl@outlook.com / QQ：3874925846（水泥）</color>
 
-<color=#ffcc00><b>人机练枪 / SCP 练习 / 限时管理面板</b></color>
+<color=#ffcc00><b>人机练枪 / SCP 练习 / 公共练习控制台</b></color>
 
 <color=#66ff99>进服即可开练，空服也有机器人陪打。</color>
 
 <color=#ff6633><b>==== 服务器特色 ====</b></color>
 <color=#00ff88>1.</color> 自动生成战斗机器人，适合热身、压枪、走位和 SCP 对抗练习。
 <color=#00ff88>2.</color> 玩家可选择人类装备，也可临时切换为 173 / 939 / 106 / 049 / 096 / 3114。
-<color=#00ff88>3.</color> 所有人都可在 <color=#ffff00>服务器专属设置（Server Specific Settings）</color> 中使用人机面板，仅开放换阵营、传送和发物品。
+<color=#00ff88>3.</color> 所有人都可在 <color=#ffff00>服务器专属设置（Server Specific Settings）</color> 中使用人机控制台，仅开放换阵营、传送和发物品。
 <color=#00ff88>4.</color> 空服自动保留少量机器人，随时进服都能开始练。
 
 <color=#ff6633><b>==== 常用命令 ====</b></color>
@@ -19,7 +19,7 @@
 <color=#ffff00>.loadout</color> 选择人类装备
 <color=#ffff00>.loadout 939 / 173 / 106 / 049 / 096 / 3114</color> 临时变成 SCP
 <color=#ffff00>.bots setcount 数量</color> 调整机器人数量
-<color=#ffff00>服务器专属设置（Server Specific Settings）</color> 打开人机面板（阵营/物品/传送/机器人）
+<color=#ffff00>服务器专属设置（Server Specific Settings）</color> 打开人机控制台（阵营/物品/传送/机器人）
 
 <color=#ff3333><b>==== 注意事项 ====</b></color>
 <color=#ffcc00>本服仍在公测开发中，机器人行为和功能会继续调整。</color>
