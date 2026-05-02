@@ -6,3 +6,4 @@ ExportedSCPSL/
 *.suo
 *.tmp
 *.log
+aliyun-scpsl-state.json

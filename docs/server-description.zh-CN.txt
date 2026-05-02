@@ -11,7 +11,7 @@
 <color=#ff6633><b>==== 服务器特色 ====</b></color>
 <color=#00ff88>1.</color> 自动生成战斗机器人，适合热身、压枪、走位和 SCP 对抗练习。
 <color=#00ff88>2.</color> 玩家可选择人类装备，也可临时切换为 173 / 939 / 106 / 049 / 096 / 3114。
-<color=#00ff88>3.</color> 所有人都可短时间使用 <color=#ffff00>.panel</color> 玩家面板，仅开放换角色、传送和发物品。
+<color=#00ff88>3.</color> 所有人都可在 <color=#ffff00>服务器专属设置（Server Specific Settings）</color> 中使用人机面板，仅开放换阵营、传送和发物品。
 <color=#00ff88>4.</color> 空服自动保留少量机器人，随时进服都能开始练。
 
 <color=#ff6633><b>==== 常用命令 ====</b></color>
@@ -19,7 +19,7 @@
 <color=#ffff00>.loadout</color> 选择人类装备
 <color=#ffff00>.loadout 939 / 173 / 106 / 049 / 096 / 3114</color> 临时变成 SCP
 <color=#ffff00>.bots setcount 数量</color> 调整机器人数量
-<color=#ffff00>.panel</color> 打开 20 秒玩家面板（职业/物品/传送/机器人）
+<color=#ffff00>服务器专属设置（Server Specific Settings）</color> 打开人机面板（阵营/物品/传送/机器人）
 
 <color=#ff3333><b>==== 注意事项 ====</b></color>
 <color=#ffcc00>本服仍在公测开发中，机器人行为和功能会继续调整。</color>

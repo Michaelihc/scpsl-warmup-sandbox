@@ -28,6 +28,7 @@ $changedServerName = $false
 $changedPlayerListTitle = $false
 $changedMaxPlayers = $false
 $changedServerInfo = $false
+$changedAfkTime = $false
 
 for ($i = 0; $i -lt $lines.Count; $i++) {
     if ($lines[$i] -match '^\s*server_name\s*:') {
@@ -53,6 +54,12 @@ for ($i = 0; $i -lt $lines.Count; $i++) {
         $changedServerInfo = $true
         continue
     }
+
+    if ($lines[$i] -match '^\s*afk_time\s*:') {
+        $lines[$i] = "afk_time: 0"
+        $changedAfkTime = $true
+        continue
+    }
 }
 
 if (-not $changedServerName) {
@@ -71,12 +78,17 @@ if (-not [string]::IsNullOrWhiteSpace($ServerInfoPastebinId) -and -not $changedS
     $lines = @("serverinfo_pastebin_id: $ServerInfoPastebinId") + $lines
 }
 
+if (-not $changedAfkTime) {
+    $lines = @("afk_time: 0") + $lines
+}
+
 Set-Content -LiteralPath $gameplayConfig -Value $lines -Encoding UTF8
 
 Write-Host "Updated SCP:SL server config:"
 Write-Host "  File: $gameplayConfig"
 Write-Host "  Server name: $ServerName"
 Write-Host "  Max players: $MaxPlayers"
+Write-Host "  AFK kick: disabled"
 if (-not [string]::IsNullOrWhiteSpace($ServerInfoPastebinId)) {
     Write-Host "  Server info pastebin ID: $ServerInfoPastebinId"
 }

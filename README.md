@@ -17,8 +17,8 @@ The plugin is built for a local SCP:SL Dedicated Server install and copies itsel
 - Optionally reset the runtime bot count when no real players remain online.
 - Runtime bot commands for count, difficulty, AI mode, map mode, SCP speeds, and close-retreat speed.
 - Human loadout selection with `loadout`, `ld`, or `kit`, plus temporary in-place SCP practice roles.
-- Player-facing `.help`, `.bots setcount <count>`, and `.panel` commands with cooldowns.
-- Player command panel for role changes, item/ammo grants, teleport helpers, and bot count changes.
+- Player-facing `.help` and `.bots setcount <count>` commands with cooldowns.
+- Server Specific Settings GUI for role changes, item/ammo grants, teleport helpers, and bot count changes.
 - Role-default gear or fully custom loadouts with reserve ammo maintenance.
 - Default fallback ammo reserve for role-default firearms, including 9x19 weapons.
 - Native SCP:SL round spawn protection support.
@@ -227,19 +227,13 @@ Player-facing commands:
 .loadout <number|name>
 .loadout <173|939|106|049|3114|096>
 .bots setcount <count>
-.panel
-.panel role <playerId|me> <role>
-.panel give <playerId|me> <item>
-.panel bring <playerId>
-.panel goto <playerId>
-.panel bots <count>
 ```
 
 Temporary SCP loadouts switch you in-place, clear inventory/ammo, and do not become your respawn loadout. After death, you return to your last selected human loadout.
 
 `.bots setcount <count>` is available to players with cooldowns: a 60 second global cooldown and a per-player cooldown of 3 minutes plus 0-60 random seconds by default.
 
-`.panel` opens a short command panel hint. Players can use it to change roles in place, give common items/ammo, bring/goto players, and adjust bot count. The default window is 20 seconds, followed by a global cooldown and a per-player cooldown. If the panel window duration is changed, the per-player cooldown scales from the configured 20 second baseline.
+Players can open SCP:SL Server Specific Settings for the GUI. Personal actions use a short local cooldown; global bot settings use the shared server cooldown.
 
 ## Configuration
 

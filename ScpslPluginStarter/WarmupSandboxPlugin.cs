@@ -21,6 +21,7 @@ using Mirror;
 using NetworkManagerUtils.Dummies;
 using NorthwoodLib;
 using PlayerRoles;
+using UserSettings.ServerSpecific;
 using UnityEngine;
 using UnityEngine.AI;
 using ApiLogger = LabApi.Features.Console.Logger;
@@ -38,8 +39,85 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private const int BotBrainReadyMaxAttempts = 40;
     private const int NavHeartbeatIntervalMs = 5000;
     private const int MinimumAutoCleanupIntervalMs = 10000;
+    private const int ArmorPickupSanitizerIntervalMs = 1000;
+    private const int DroppedArmorPickupDestroyDelayMs = 1;
     private const ushort DefaultReserveAmmoTarget = 240;
+    private const int PlayerPanelFirstSettingId = 63001;
+    private const int PlayerPanelRoleSettingId = 63001;
+    private const int PlayerPanelLoadoutSettingId = 63002;
+    private const int PlayerPanelItemSettingId = 63003;
+    private const int PlayerPanelTeleportTargetSettingId = 63004;
+    private const int PlayerPanelBotCountSettingId = 63005;
+    private const int PlayerPanelDifficultySettingId = 63006;
+    private const int PlayerPanelAiModeSettingId = 63007;
+    private const int PlayerPanelBotTargetSettingId = 63008;
+    private const int PlayerPanelBotRoleSettingId = 63009;
+    private const int PlayerPanelRetreatSpeedSettingId = 63010;
+    private const int PlayerPanelSetRoleButtonId = 63011;
+    private const int PlayerPanelApplyLoadoutButtonId = 63012;
+    private const int PlayerPanelGiveItemButtonId = 63013;
+    private const int PlayerPanelGotoButtonId = 63014;
+    private const int PlayerPanelBringBotsButtonId = 63015;
+    private const int PlayerPanelSetBotsButtonId = 63021;
+    private const int PlayerPanelApplyDifficultyButtonId = 63022;
+    private const int PlayerPanelApplyAiModeButtonId = 63023;
+    private const int PlayerPanelApplyBotRoleButtonId = 63024;
+    private const int PlayerPanelApplyRetreatSpeedButtonId = 63025;
+    private const int PlayerPanelLastSettingId = 63050;
+    private const int PlayerPanelPersonalCooldownSeconds = 10;
+    private const int PlayerPanelSelfTargetId = int.MinValue;
+    private const int PlayerPanelAllBotsTargetId = int.MinValue + 1;
     private static readonly int[] BotAttachmentRandomizationDelaysMs = { 250, 1000, 2500 };
+    private static readonly RoleTypeId[] PlayerPanelRoles = Enum.GetValues(typeof(RoleTypeId))
+        .Cast<RoleTypeId>()
+        .Where(IsPlayerPanelRoleAllowed)
+        .OrderBy(role => role.ToString(), StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+    private static readonly RoleTypeId[] PlayerPanelBotRoles = PlayerPanelRoles
+        .Where(role => role != RoleTypeId.Spectator)
+        .ToArray();
+    private static readonly ItemType[] PlayerPanelItems = Enum.GetValues(typeof(ItemType))
+        .Cast<ItemType>()
+        .Where(IsPlayerPanelItemAllowed)
+        .OrderBy(item => item.ToString(), StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+    private static readonly WarmupDifficulty[] PlayerPanelDifficulties = Enum.GetValues(typeof(WarmupDifficulty))
+        .Cast<WarmupDifficulty>()
+        .ToArray();
+    private static readonly WarmupAiMode[] PlayerPanelAiModes = Enum.GetValues(typeof(WarmupAiMode))
+        .Cast<WarmupAiMode>()
+        .ToArray();
+
+    private static bool IsPlayerPanelRoleAllowed(RoleTypeId role)
+    {
+        if (role == RoleTypeId.None)
+        {
+            return false;
+        }
+
+        string name = role.ToString();
+        return !string.Equals(name, "Overwatch", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(name, "Filmmaker", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(name, "Tutorial", StringComparison.OrdinalIgnoreCase)
+            && name.IndexOf("Flamingo", StringComparison.OrdinalIgnoreCase) < 0;
+    }
+
+    private static bool IsPlayerPanelItemAllowed(ItemType item)
+    {
+        if (item == ItemType.None)
+        {
+            return false;
+        }
+
+        string name = item.ToString();
+        return name.IndexOf("Debug", StringComparison.OrdinalIgnoreCase) < 0
+            && name.IndexOf("Ragdoll", StringComparison.OrdinalIgnoreCase) < 0;
+    }
+
+    private static bool IsArmorItem(ItemType item)
+    {
+        return item.ToString().IndexOf("Armor", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
 
     private static readonly ActionDispatcher? MainThreadActions = typeof(MainThreadDispatcher)
         .GetField("UpdateDispatcher", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)?
@@ -64,6 +142,17 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private readonly Dictionary<int, long> _playerBotCountCooldownUntilMs = new();
     private readonly Dictionary<int, long> _playerPanelCooldownUntilMs = new();
     private readonly Dictionary<int, long> _playerPanelWindowUntilMs = new();
+    private readonly Dictionary<int, long> _playerPanelPersonalCooldownUntilMs = new();
+    private readonly Dictionary<int, int> _playerPanelSelectedTargetIds = new();
+    private readonly Dictionary<int, RoleTypeId> _playerPanelSelectedRoles = new();
+    private readonly Dictionary<int, string> _playerPanelSelectedLoadouts = new();
+    private readonly Dictionary<int, ItemType> _playerPanelSelectedItems = new();
+    private readonly Dictionary<int, int> _playerPanelSelectedBotCounts = new();
+    private readonly Dictionary<int, WarmupDifficulty> _playerPanelSelectedDifficulties = new();
+    private readonly Dictionary<int, WarmupAiMode> _playerPanelSelectedAiModes = new();
+    private readonly Dictionary<int, int> _playerPanelSelectedBotTargetIds = new();
+    private readonly Dictionary<int, RoleTypeId> _playerPanelSelectedBotRoles = new();
+    private readonly Dictionary<int, float> _playerPanelSelectedRetreatSpeedScales = new();
     private readonly System.Random _random = new();
     private readonly HumanPresetService _humanPresetService = new();
     private readonly BotCombatService _botCombatService = new();
@@ -78,6 +167,9 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private int _roundCampDisabledUntilTick;
     private long _playerBotCountGlobalCooldownUntilMs;
     private long _playerPanelGlobalCooldownUntilMs;
+    private ServerSpecificSettingBase[]? _originalServerSpecificSettings;
+    private int[] _playerPanelTargetIds = { PlayerPanelSelfTargetId };
+    private int[] _playerPanelBotTargetIds = { PlayerPanelAllBotsTargetId };
     private bool _warmupActive;
 
     public static WarmupSandboxPlugin? Instance { get; private set; }
@@ -115,6 +207,9 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         PlayerEvents.PickingUpItem += OnPlayerPickingUpItem;
         PlayerEvents.DroppedItem += OnPlayerDroppedItem;
         PlayerEvents.Cuffing += OnPlayerCuffing;
+        ServerSpecificSettingsSync.ServerOnSettingValueReceived += OnServerSpecificSettingValueReceived;
+        _originalServerSpecificSettings = ServerSpecificSettingsSync.DefinedSettings;
+        RefreshPlayerPanelSettings(sendToPlayers: false);
         ApiLogger.Info($"[{Name}] Enabled.");
     }
 
@@ -134,6 +229,14 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         PlayerEvents.Cuffing -= OnPlayerCuffing;
         PlayerEvents.DroppedItem -= OnPlayerDroppedItem;
         PlayerEvents.PickingUpItem -= OnPlayerPickingUpItem;
+        ServerSpecificSettingsSync.ServerOnSettingValueReceived -= OnServerSpecificSettingValueReceived;
+        if (_originalServerSpecificSettings != null)
+        {
+            ServerSpecificSettingsSync.DefinedSettings = _originalServerSpecificSettings;
+            ServerSpecificSettingsSync.SendToAll();
+            _originalServerSpecificSettings = null;
+        }
+
         PlayerEvents.SearchingPickup -= OnPlayerSearchingPickup;
         PlayerEvents.CancelledUsingItem -= OnPlayerCancelledUsingItem;
         PlayerEvents.UsedItem -= OnPlayerUsedItem;
@@ -194,6 +297,8 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     private void OnPlayerJoined(PlayerJoinedEventArgs ev)
     {
+        RefreshPlayerPanelSettings(sendToPlayers: true);
+
         if (Config.ForceRoundStartOnFirstPlayer && IsManagedHuman(ev.Player) && !Round.IsRoundStarted)
         {
             int generation = _warmupGeneration;
@@ -349,6 +454,18 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         _playerBotCountCooldownUntilMs.Remove(ev.Player.PlayerId);
         _playerPanelCooldownUntilMs.Remove(ev.Player.PlayerId);
         _playerPanelWindowUntilMs.Remove(ev.Player.PlayerId);
+        _playerPanelPersonalCooldownUntilMs.Remove(ev.Player.PlayerId);
+        _playerPanelSelectedTargetIds.Remove(ev.Player.PlayerId);
+        _playerPanelSelectedRoles.Remove(ev.Player.PlayerId);
+        _playerPanelSelectedLoadouts.Remove(ev.Player.PlayerId);
+        _playerPanelSelectedItems.Remove(ev.Player.PlayerId);
+        _playerPanelSelectedBotCounts.Remove(ev.Player.PlayerId);
+        _playerPanelSelectedDifficulties.Remove(ev.Player.PlayerId);
+        _playerPanelSelectedAiModes.Remove(ev.Player.PlayerId);
+        _playerPanelSelectedBotTargetIds.Remove(ev.Player.PlayerId);
+        _playerPanelSelectedBotRoles.Remove(ev.Player.PlayerId);
+        _playerPanelSelectedRetreatSpeedScales.Remove(ev.Player.PlayerId);
+        RefreshPlayerPanelSettings(sendToPlayers: true);
 
         if (RemoveManagedBot(ev.Player.PlayerId))
         {
@@ -458,6 +575,12 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private void OnPlayerDroppedItem(PlayerDroppedItemEventArgs ev)
     {
         _bombModeService.OnDroppedItem(ev);
+
+        Pickup? droppedPickup = ev.Pickup;
+        if (droppedPickup != null && IsArmorItem(droppedPickup.Type))
+        {
+            Schedule(() => TryDestroyArmorPickup(droppedPickup, "drop"), DroppedArmorPickupDestroyDelayMs);
+        }
     }
 
     private void OnPlayerCuffing(PlayerCuffingEventArgs ev)
@@ -474,6 +597,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         int generation = _warmupGeneration;
         ScheduleNavHeartbeat(generation);
         ScheduleAutoCleanup(generation);
+        ScheduleArmorPickupSanitizer(generation);
         ScheduleHelpReminderBroadcast(generation);
         Schedule(() => SetupWarmup(generation), Config.InitialSetupDelayMs);
     }
@@ -497,6 +621,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
         PrepareArenaMapForWarmup();
         PrepareFacilityNavMeshForWarmup();
+        CleanupArmorPickups();
 
         foreach (Player player in Player.List.Where(IsManagedHuman))
         {
@@ -561,6 +686,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
         ClampConfiguredBotCount();
         CleanupMissingBotEntries();
+        TrimExcessBots();
         while (_managedBots.Count < Config.BotCount)
         {
             SpawnBot(generation);
@@ -636,6 +762,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         state.RespawnRole = Config.BotRole;
         state.LastPosition = bot.Position;
         _managedBots[bot.PlayerId] = state;
+        RefreshPlayerPanelSettings(sendToPlayers: true);
         Schedule(() => ActivateSpawnedBot(bot.PlayerId, generation), Config.BotRoleAssignDelayMs);
     }
 
@@ -1531,14 +1658,21 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
         RoleTypeId selectedRole = preset.Role;
         bool shouldRespawnForPreset = preset.UseRoleDefaultLoadout || player.Role != selectedRole;
-        if (applyNow && player.Role != RoleTypeId.Spectator)
+        if (applyNow)
         {
-            if (shouldRespawnForPreset)
+            if (player.Role == RoleTypeId.Spectator)
+            {
+                player.SetRole(selectedRole, RoleChangeReason.RemoteAdmin, RoleSpawnFlags.All);
+                response += WarmupLocalization.T(
+                    " Respawning at the default spawnpoint.",
+                    " 正在默认出生点重生。");
+            }
+            else if (shouldRespawnForPreset)
             {
                 player.SetRole(selectedRole, RoleChangeReason.RemoteAdmin, RoleSpawnFlags.All);
                 response += preset.UseRoleDefaultLoadout
-                    ? WarmupLocalization.T(" Respawning now with role-default gear.", " 正在以职业默认装备重生。")
-                    : WarmupLocalization.T(" Respawning now with the selected role.", " 正在以所选职业重生。");
+                    ? WarmupLocalization.T(" Respawning now with role-default gear.", " 正在以阵营默认装备重生。")
+                    : WarmupLocalization.T(" Respawning now with the selected role.", " 正在以所选阵营重生。");
             }
             else if (preset.Loadout != null)
             {
@@ -1559,10 +1693,12 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     {
         if (player.Role == RoleTypeId.Spectator)
         {
+            player.SetRole(scpRole, RoleChangeReason.RemoteAdmin, RoleSpawnFlags.All);
             response = WarmupLocalization.T(
-                "You must be spawned before using a temporary SCP practice role.",
-                "你需要先出生，才能临时切换为 SCP 练习角色。");
-            return false;
+                $"Temporary SCP practice role: {scpRole}. Spawned at the default spawnpoint. Your selected human loadout is unchanged for your next respawn.",
+                $"临时 SCP 练习角色：{scpRole}。已在默认出生点重生。你的下一次重生仍会使用之前选择的人类预设。");
+            player.SendHint(response, 5f);
+            return true;
         }
 
         Vector3 position = player.Position;
@@ -2479,6 +2615,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
         _managedBots.Clear();
         ClearNavAgentDebugVisuals();
+        RefreshPlayerPanelSettings(sendToPlayers: true);
     }
 
     private void CleanupMissingBotEntries()
@@ -2510,7 +2647,13 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             }
         }
 
-        return _managedBots.Remove(playerId);
+        bool removed = _managedBots.Remove(playerId);
+        if (removed)
+        {
+            RefreshPlayerPanelSettings(sendToPlayers: true);
+        }
+
+        return removed;
     }
 
     private bool IsCurrentGeneration(int generation)
@@ -2576,6 +2719,11 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         Schedule(() => RunAutoCleanup(generation), delayMs);
     }
 
+    private void ScheduleArmorPickupSanitizer(int generation)
+    {
+        Schedule(() => RunArmorPickupSanitizer(generation), ArmorPickupSanitizerIntervalMs);
+    }
+
     private void ScheduleHelpReminderBroadcast(int generation)
     {
         if (!Config.BroadcastHelpReminder || Config.HelpReminderIntervalSeconds <= 0 || Config.HelpReminderDurationSeconds <= 0)
@@ -2596,8 +2744,8 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
 
         string text = WarmupLocalization.T(
-            "<size=28><color=#00ffff><b>Use .help for commands</b></color></size>\n<size=22>.loadout / .bots setcount / .panel</size>",
-            "<size=28><color=#00ffff><b>输入 .help 查看命令</b></color></size>\n<size=22>.loadout / .bots setcount / .panel 面板</size>");
+            "<size=28><color=#00ffff><b>Use .help for commands</b></color></size>\n<size=22>Open Server Specific Settings for the bot GUI</size>",
+            "<size=28><color=#00ffff><b>输入 .help 查看命令</b></color></size>\n<size=22>打开服务器专属设置（Server Specific Settings）使用人机面板</size>");
 
         foreach (Player player in Player.List.Where(IsManagedHuman))
         {
@@ -2605,6 +2753,22 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
 
         ScheduleHelpReminderBroadcast(generation);
+    }
+
+    private void RunArmorPickupSanitizer(int generation)
+    {
+        if (!IsCurrentGeneration(generation) || !_warmupActive)
+        {
+            return;
+        }
+
+        int removed = CleanupArmorPickups();
+        if (removed > 0 && Config.EnableDebugLogging)
+        {
+            ApiLogger.Info($"[{Name}] Removed armor pickups={removed} to prevent BodyArmorPickup update spam.");
+        }
+
+        ScheduleArmorPickupSanitizer(generation);
     }
 
     private void RunAutoCleanup(int generation)
@@ -2657,6 +2821,43 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
 
         return removed;
+    }
+
+    private int CleanupArmorPickups()
+    {
+        int removed = 0;
+        foreach (Pickup pickup in Pickup.List.ToArray())
+        {
+            if (TryDestroyArmorPickup(pickup, "sanitizer"))
+            {
+                removed++;
+            }
+        }
+
+        return removed;
+    }
+
+    private bool TryDestroyArmorPickup(Pickup? pickup, string reason)
+    {
+        if (pickup == null || pickup.IsDestroyed || !IsArmorItem(pickup.Type))
+        {
+            return false;
+        }
+
+        try
+        {
+            pickup.Destroy();
+            return true;
+        }
+        catch (Exception exception)
+        {
+            if (Config.EnableDebugLogging)
+            {
+                ApiLogger.Warn($"[{Name}] Failed to remove armor pickup ({reason}) {pickup}: {exception.Message}");
+            }
+
+            return false;
+        }
     }
 
     private int CleanupRagdolls()
@@ -3485,6 +3686,448 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         return true;
     }
 
+    private void RefreshPlayerPanelSettings(bool sendToPlayers)
+    {
+        if (!Config.PlayerPanelEnabled)
+        {
+            return;
+        }
+
+        List<Player> players = GetPlayerPanelTargets();
+
+        string[] targetOptions = new string[players.Count + 1];
+        int[] targetIds = new int[players.Count + 1];
+        targetOptions[0] = WarmupLocalization.T("Self", "自己");
+        targetIds[0] = PlayerPanelSelfTargetId;
+
+        for (int i = 0; i < players.Count; i++)
+        {
+            Player candidate = players[i];
+            targetOptions[i + 1] = $"#{candidate.PlayerId} {candidate.Nickname}";
+            targetIds[i + 1] = candidate.PlayerId;
+        }
+
+        _playerPanelTargetIds = targetIds;
+        List<Player> botTargets = GetPlayerPanelBotTargets();
+        string[] botTargetOptions = new string[botTargets.Count + 1];
+        int[] botTargetIds = new int[botTargets.Count + 1];
+        botTargetOptions[0] = WarmupLocalization.T("All Bots", "全部机器人");
+        botTargetIds[0] = PlayerPanelAllBotsTargetId;
+
+        for (int i = 0; i < botTargets.Count; i++)
+        {
+            Player bot = botTargets[i];
+            botTargetOptions[i + 1] = $"#{bot.PlayerId} {bot.Nickname}";
+            botTargetIds[i + 1] = bot.PlayerId;
+        }
+
+        _playerPanelBotTargetIds = botTargetIds;
+        NamedLoadoutDefinition[] presets = GetHumanLoadoutPresets();
+        string[] loadoutOptions = presets.Length == 0
+            ? new[] { "Default" }
+            : presets.Select(preset => preset.Name).ToArray();
+        int defaultBotCount = ClampPanelBotCount(Config.BotCount);
+        int defaultDifficulty = Math.Max(0, Array.IndexOf(PlayerPanelDifficulties, Config.DifficultyPreset));
+        int defaultAiMode = Math.Max(0, Array.IndexOf(PlayerPanelAiModes, Config.BotBehavior.AiMode));
+        int defaultRetreatSpeed = Mathf.RoundToInt(ClampCloseRetreatSpeedScale(Config.BotBehavior.CloseRetreatSpeedScale) * 100f);
+        ServerSpecificSettingBase[] pluginSettings =
+        {
+            new SSGroupHeader(WarmupLocalization.T("Warmup Player Panel", "人机战斗面板"), false, WarmupLocalization.T("Use the sections below.", "使用下方选项。")),
+            new SSTextArea(
+                null,
+                WarmupLocalization.T("How to use", "使用说明"),
+                SSTextArea.FoldoutMode.ExtendedByDefault,
+                WarmupLocalization.T(
+                    "Pick a value, then press Apply. Personal: 10s. Global: shared cooldown.",
+                    "先选数值，再点应用。个人 10 秒；全局共享冷却。"),
+                TMPro.TextAlignmentOptions.Left),
+            new SSGroupHeader(WarmupLocalization.T("Personal Controls", "个人功能"), false, WarmupLocalization.T("10s cooldown.", "10 秒冷却。")),
+            new SSDropdownSetting(PlayerPanelRoleSettingId, WarmupLocalization.T("My Role", "我的阵营"), PlayerPanelRoles.Select(role => role.ToString()).ToArray(), 0, SSDropdownSetting.DropdownEntryType.HybridLoop, WarmupLocalization.T("Set role. Spectators use the default spawnpoint.", "设置阵营。旁观者会使用默认出生点。"), 0, false),
+            new SSButton(PlayerPanelSetRoleButtonId, WarmupLocalization.T("Apply My Role", "应用阵营"), WarmupLocalization.T("APPLY", "应用"), null, WarmupLocalization.T("Apply role.", "应用阵营。")),
+            new SSDropdownSetting(PlayerPanelLoadoutSettingId, WarmupLocalization.T("My Loadout", "我的预设"), loadoutOptions, 0, SSDropdownSetting.DropdownEntryType.HybridLoop, WarmupLocalization.T("Loadout preset.", "预设。"), 0, false),
+            new SSButton(PlayerPanelApplyLoadoutButtonId, WarmupLocalization.T("Apply Loadout", "应用预设"), WarmupLocalization.T("APPLY", "应用"), null, WarmupLocalization.T("Apply loadout.", "应用预设。")),
+            new SSDropdownSetting(PlayerPanelItemSettingId, WarmupLocalization.T("Give Item", "给物品"), PlayerPanelItems.Select(item => item.ToString()).ToArray(), 0, SSDropdownSetting.DropdownEntryType.HybridLoop, WarmupLocalization.T("Item to give yourself.", "给自己的物品。"), 0, false),
+            new SSButton(PlayerPanelGiveItemButtonId, WarmupLocalization.T("Apply Item", "应用物品"), WarmupLocalization.T("GIVE", "给予"), null, WarmupLocalization.T("Give item.", "给予物品。")),
+            new SSDropdownSetting(PlayerPanelTeleportTargetSettingId, WarmupLocalization.T("Teleport Target", "传送目标"), targetOptions, 0, SSDropdownSetting.DropdownEntryType.HybridLoop, WarmupLocalization.T("Includes bots.", "包含机器人。"), 0, false),
+            new SSButton(PlayerPanelGotoButtonId, WarmupLocalization.T("Apply Teleport", "应用传送"), WarmupLocalization.T("GO", "传送"), null, WarmupLocalization.T("Teleport to target.", "传送到目标。")),
+            new SSButton(PlayerPanelBringBotsButtonId, WarmupLocalization.T("Bring Bots", "召回机器人"), WarmupLocalization.T("BRING", "召回"), null, WarmupLocalization.T("Bring bots to you.", "将机器人召回到你身边。")),
+            new SSGroupHeader(WarmupLocalization.T("Global Controls", "全局功能"), false, WarmupLocalization.T("Shared cooldown.", "共享冷却。")),
+            new SSSliderSetting(PlayerPanelBotCountSettingId, WarmupLocalization.T("Bot Count", "机器人数量"), 0, 30, defaultBotCount, true, "0", "{0}", WarmupLocalization.T("0-30 bots.", "0-30 个。"), 0, false),
+            new SSButton(PlayerPanelSetBotsButtonId, WarmupLocalization.T("Apply Bot Count", "应用数量"), WarmupLocalization.T("APPLY", "应用"), null, WarmupLocalization.T("Apply bot count.", "应用数量。")),
+            new SSDropdownSetting(PlayerPanelDifficultySettingId, WarmupLocalization.T("Difficulty", "难度"), PlayerPanelDifficulties.Select(difficulty => difficulty.ToString()).ToArray(), defaultDifficulty, SSDropdownSetting.DropdownEntryType.HybridLoop, WarmupLocalization.T("Bot difficulty.", "机器人难度。"), 0, false),
+            new SSButton(PlayerPanelApplyDifficultyButtonId, WarmupLocalization.T("Apply Difficulty", "应用难度"), WarmupLocalization.T("APPLY", "应用"), null, WarmupLocalization.T("Apply difficulty.", "应用难度。")),
+            new SSDropdownSetting(PlayerPanelAiModeSettingId, WarmupLocalization.T("AI Mode", "AI 模式"), PlayerPanelAiModes.Select(mode => mode.ToString()).ToArray(), defaultAiMode, SSDropdownSetting.DropdownEntryType.HybridLoop, WarmupLocalization.T("Bot AI mode.", "机器人 AI 模式。"), 0, false),
+            new SSButton(PlayerPanelApplyAiModeButtonId, WarmupLocalization.T("Apply AI Mode", "应用 AI"), WarmupLocalization.T("APPLY", "应用"), null, WarmupLocalization.T("Apply AI mode.", "应用 AI 模式。")),
+            new SSSliderSetting(PlayerPanelRetreatSpeedSettingId, WarmupLocalization.T("Bot Retreat Speed", "机器人后退速度"), 60, 100, defaultRetreatSpeed, true, "60%", "{0}%", WarmupLocalization.T("60%-100% retreat speed.", "后退速度 60%-100%。"), 0, false),
+            new SSButton(PlayerPanelApplyRetreatSpeedButtonId, WarmupLocalization.T("Apply Retreat Speed", "应用后退速度"), WarmupLocalization.T("APPLY", "应用"), null, WarmupLocalization.T("Uses global cooldown.", "使用全局冷却。")),
+            new SSDropdownSetting(PlayerPanelBotTargetSettingId, WarmupLocalization.T("Bot Target", "机器人目标"), botTargetOptions, 0, SSDropdownSetting.DropdownEntryType.HybridLoop, WarmupLocalization.T("Bot(s) to change.", "要修改的机器人。"), 0, false),
+            new SSDropdownSetting(PlayerPanelBotRoleSettingId, WarmupLocalization.T("Bot Role", "机器人阵营"), PlayerPanelBotRoles.Select(role => role.ToString()).ToArray(), 0, SSDropdownSetting.DropdownEntryType.HybridLoop, WarmupLocalization.T("Sets the bot's persistent respawn role.", "设置机器人的永久重生阵营。"), 0, false),
+            new SSButton(PlayerPanelApplyBotRoleButtonId, WarmupLocalization.T("Apply Bot Role", "应用机器人阵营"), WarmupLocalization.T("APPLY", "应用"), null, WarmupLocalization.T("Uses global cooldown.", "使用全局冷却。")),
+        };
+
+        ServerSpecificSettingsSync.DefinedSettings = MergeServerSpecificSettings(pluginSettings);
+        if (sendToPlayers)
+        {
+            ServerSpecificSettingsSync.SendToAll();
+        }
+    }
+
+    private List<Player> GetPlayerPanelTargets()
+    {
+        Dictionary<int, Player> targets = new();
+
+        foreach (Player candidate in Player.List)
+        {
+            AddPlayerPanelTarget(targets, candidate);
+        }
+
+        foreach (int playerId in _managedBots.Keys.ToArray())
+        {
+            if (Player.TryGet(playerId, out Player bot))
+            {
+                AddPlayerPanelTarget(targets, bot);
+            }
+        }
+
+        return targets.Values
+            .OrderBy(candidate => IsManagedBot(candidate) ? 1 : 0)
+            .ThenBy(candidate => candidate.PlayerId)
+            .ToList();
+    }
+
+    private List<Player> GetPlayerPanelBotTargets()
+    {
+        return _managedBots.Keys
+            .Select(playerId => Player.TryGet(playerId, out Player bot) ? bot : null)
+            .Where(bot => bot != null && !bot.IsDestroyed)
+            .Cast<Player>()
+            .OrderBy(bot => bot.PlayerId)
+            .ToList();
+    }
+
+    private static void AddPlayerPanelTarget(Dictionary<int, Player> targets, Player? candidate)
+    {
+        if (candidate == null
+            || candidate.IsDestroyed
+            || candidate.IsHost
+            || targets.ContainsKey(candidate.PlayerId))
+        {
+            return;
+        }
+
+        targets[candidate.PlayerId] = candidate;
+    }
+
+    private ServerSpecificSettingBase[] MergeServerSpecificSettings(ServerSpecificSettingBase[] pluginSettings)
+    {
+        if (_originalServerSpecificSettings == null || _originalServerSpecificSettings.Length == 0)
+        {
+            return pluginSettings;
+        }
+
+        return _originalServerSpecificSettings
+            .Where(setting => setting != null && (setting.SettingId < PlayerPanelFirstSettingId || setting.SettingId > PlayerPanelLastSettingId))
+            .Concat(pluginSettings)
+            .ToArray();
+    }
+
+    private void OnServerSpecificSettingValueReceived(ReferenceHub hub, ServerSpecificSettingBase setting)
+    {
+        Player actor = hub == null ? null! : Player.Get(hub);
+        if (hub == null || setting == null || actor == null || actor.IsDestroyed)
+        {
+            return;
+        }
+
+        switch (setting.SettingId)
+        {
+            case PlayerPanelTeleportTargetSettingId when setting is SSDropdownSetting targetDropdown:
+                int targetIndex = Math.Max(0, Math.Min(_playerPanelTargetIds.Length - 1, targetDropdown.SyncSelectionIndexValidated));
+                _playerPanelSelectedTargetIds[actor.PlayerId] = _playerPanelTargetIds[targetIndex];
+                return;
+
+            case PlayerPanelRoleSettingId when setting is SSDropdownSetting roleDropdown:
+                int roleIndex = Math.Max(0, Math.Min(PlayerPanelRoles.Length - 1, roleDropdown.SyncSelectionIndexValidated));
+                _playerPanelSelectedRoles[actor.PlayerId] = PlayerPanelRoles[roleIndex];
+                return;
+
+            case PlayerPanelLoadoutSettingId when setting is SSDropdownSetting loadoutDropdown:
+                string[] loadoutOptions = GetHumanLoadoutPresets().Select(preset => preset.Name).DefaultIfEmpty("Default").ToArray();
+                int loadoutIndex = Math.Max(0, Math.Min(loadoutOptions.Length - 1, loadoutDropdown.SyncSelectionIndexValidated));
+                _playerPanelSelectedLoadouts[actor.PlayerId] = loadoutOptions[loadoutIndex];
+                return;
+
+            case PlayerPanelItemSettingId when setting is SSDropdownSetting itemDropdown:
+                int itemIndex = Math.Max(0, Math.Min(PlayerPanelItems.Length - 1, itemDropdown.SyncSelectionIndexValidated));
+                _playerPanelSelectedItems[actor.PlayerId] = PlayerPanelItems[itemIndex];
+                return;
+
+            case PlayerPanelBotCountSettingId when setting is SSSliderSetting slider:
+                _playerPanelSelectedBotCounts[actor.PlayerId] = ClampPanelBotCount(slider.SyncIntValue);
+                return;
+
+            case PlayerPanelDifficultySettingId when setting is SSDropdownSetting difficultyDropdown:
+                int difficultyIndex = Math.Max(0, Math.Min(PlayerPanelDifficulties.Length - 1, difficultyDropdown.SyncSelectionIndexValidated));
+                _playerPanelSelectedDifficulties[actor.PlayerId] = PlayerPanelDifficulties[difficultyIndex];
+                return;
+
+            case PlayerPanelAiModeSettingId when setting is SSDropdownSetting aiModeDropdown:
+                int aiModeIndex = Math.Max(0, Math.Min(PlayerPanelAiModes.Length - 1, aiModeDropdown.SyncSelectionIndexValidated));
+                _playerPanelSelectedAiModes[actor.PlayerId] = PlayerPanelAiModes[aiModeIndex];
+                return;
+
+            case PlayerPanelRetreatSpeedSettingId when setting is SSSliderSetting retreatSpeedSlider:
+                _playerPanelSelectedRetreatSpeedScales[actor.PlayerId] = ClampCloseRetreatSpeedScale(retreatSpeedSlider.SyncIntValue / 100f);
+                return;
+
+            case PlayerPanelBotTargetSettingId when setting is SSDropdownSetting botTargetDropdown:
+                int botTargetIndex = Math.Max(0, Math.Min(_playerPanelBotTargetIds.Length - 1, botTargetDropdown.SyncSelectionIndexValidated));
+                _playerPanelSelectedBotTargetIds[actor.PlayerId] = _playerPanelBotTargetIds[botTargetIndex];
+                return;
+
+            case PlayerPanelBotRoleSettingId when setting is SSDropdownSetting botRoleDropdown:
+                int botRoleIndex = Math.Max(0, Math.Min(PlayerPanelBotRoles.Length - 1, botRoleDropdown.SyncSelectionIndexValidated));
+                _playerPanelSelectedBotRoles[actor.PlayerId] = PlayerPanelBotRoles[botRoleIndex];
+                return;
+
+            case PlayerPanelSetRoleButtonId:
+                ExecutePlayerPanelPersonalAction(actor, "role");
+                return;
+
+            case PlayerPanelApplyLoadoutButtonId:
+                ExecutePlayerPanelPersonalAction(actor, "loadout");
+                return;
+
+            case PlayerPanelGiveItemButtonId:
+                ExecutePlayerPanelPersonalAction(actor, "give");
+                return;
+
+            case PlayerPanelGotoButtonId:
+                ExecutePlayerPanelPersonalAction(actor, "goto");
+                return;
+
+            case PlayerPanelBringBotsButtonId:
+                ExecutePlayerPanelPersonalAction(actor, "bringbots");
+                return;
+
+            case PlayerPanelSetBotsButtonId:
+                ExecutePlayerPanelGlobalAction(actor, "bots");
+                return;
+
+            case PlayerPanelApplyDifficultyButtonId:
+                ExecutePlayerPanelGlobalAction(actor, "difficulty");
+                return;
+
+            case PlayerPanelApplyAiModeButtonId:
+                ExecutePlayerPanelGlobalAction(actor, "aimode");
+                return;
+
+            case PlayerPanelApplyRetreatSpeedButtonId:
+                ExecutePlayerPanelGlobalAction(actor, "retreatspeed");
+                return;
+
+            case PlayerPanelApplyBotRoleButtonId:
+                ExecutePlayerPanelGlobalAction(actor, "botrole");
+                return;
+        }
+    }
+
+    private void ExecutePlayerPanelPersonalAction(Player actor, string action)
+    {
+        if (!TryUsePlayerPanelPersonalCooldown(actor, out string cooldownResponse))
+        {
+            actor.SendHint(cooldownResponse, 1.05f);
+            return;
+        }
+
+        switch (action)
+        {
+            case "role":
+                RoleTypeId role = _playerPanelSelectedRoles.TryGetValue(actor.PlayerId, out RoleTypeId selectedRole)
+                    ? selectedRole
+                    : PlayerPanelRoles.FirstOrDefault();
+                TryPanelSetRole(actor, actor, role, out _);
+                break;
+
+            case "loadout":
+                string loadout = _playerPanelSelectedLoadouts.TryGetValue(actor.PlayerId, out string? selectedLoadout)
+                    ? selectedLoadout
+                    : GetHumanLoadoutPresets().FirstOrDefault()?.Name ?? "Default";
+                TrySelectHumanLoadout(actor, loadout, applyNow: true, out string loadoutResponse);
+                actor.SendHint(loadoutResponse, 4f);
+                break;
+
+            case "give":
+                ItemType item = _playerPanelSelectedItems.TryGetValue(actor.PlayerId, out ItemType selectedItem)
+                    ? selectedItem
+                    : PlayerPanelItems.FirstOrDefault();
+                TryPanelGive(actor, actor, item, out _);
+                break;
+
+            case "goto":
+                Player target = ResolveSelectedPanelTarget(actor);
+                TryPanelGoto(actor, target, out _);
+                break;
+
+            case "bringbots":
+                TryPanelBringBots(actor, GetSelectedPanelBotTargetId(actor), out _);
+                break;
+
+        }
+    }
+
+    private void ExecutePlayerPanelGlobalAction(Player actor, string action)
+    {
+        if (!TryUsePlayerPanelGlobalCooldown(actor, out string cooldownResponse))
+        {
+            actor.SendHint(cooldownResponse, 1.05f);
+            return;
+        }
+
+        string response;
+        switch (action)
+        {
+            case "bots":
+                int count = _playerPanelSelectedBotCounts.TryGetValue(actor.PlayerId, out int selectedCount)
+                    ? selectedCount
+                    : Config.BotCount;
+                Config.BotCount = ClampPanelBotCount(count);
+                SaveConfig();
+                EnsureBotPopulation(_warmupGeneration);
+                response = WarmupLocalization.T(
+                    $"Bot count set to {Config.BotCount}.",
+                    $"机器人数量已设置为 {Config.BotCount}。");
+                break;
+
+            case "difficulty":
+                WarmupDifficulty difficulty = _playerPanelSelectedDifficulties.TryGetValue(actor.PlayerId, out WarmupDifficulty selectedDifficulty)
+                    ? selectedDifficulty
+                    : Config.DifficultyPreset;
+                ApplyDifficultyPreset(difficulty.ToString(), out response);
+                break;
+
+            case "aimode":
+                WarmupAiMode aiMode = _playerPanelSelectedAiModes.TryGetValue(actor.PlayerId, out WarmupAiMode selectedAiMode)
+                    ? selectedAiMode
+                    : Config.BotBehavior.AiMode;
+                ApplyAiMode(aiMode.ToString(), out response);
+                break;
+
+            case "retreatspeed":
+                float retreatSpeedScale = _playerPanelSelectedRetreatSpeedScales.TryGetValue(actor.PlayerId, out float selectedRetreatSpeedScale)
+                    ? selectedRetreatSpeedScale
+                    : Config.BotBehavior.CloseRetreatSpeedScale;
+                Config.BotBehavior.CloseRetreatSpeedScale = ClampCloseRetreatSpeedScale(retreatSpeedScale);
+                SaveConfig();
+                response = WarmupLocalization.T(
+                    $"Bot retreat speed set to {Config.BotBehavior.CloseRetreatSpeedScale:P0}.",
+                    $"机器人后退速度已设置为 {Config.BotBehavior.CloseRetreatSpeedScale:P0}。");
+                break;
+
+            case "botrole":
+                TryApplyPanelBotRole(actor, out response);
+                break;
+
+            default:
+                response = WarmupLocalization.T("Unknown global action.", "未知全局操作。");
+                break;
+        }
+
+        actor.SendHint(response, 4f);
+        ApiLogger.Info($"[WarmupSandbox] Player panel global actor={actor.Nickname}#{actor.PlayerId} action={action} response={response}");
+    }
+
+    private Player ResolveSelectedPanelTarget(Player actor)
+    {
+        if (!_playerPanelSelectedTargetIds.TryGetValue(actor.PlayerId, out int targetId)
+            || targetId == PlayerPanelSelfTargetId
+            || !TryGetPlayerPanelTargetById(targetId, out Player target)
+            || target == null
+            || target.IsDestroyed)
+        {
+            return actor;
+        }
+
+        return target;
+    }
+
+    private int GetSelectedPanelBotTargetId(Player actor)
+    {
+        return _playerPanelSelectedBotTargetIds.TryGetValue(actor.PlayerId, out int targetId)
+            ? targetId
+            : PlayerPanelAllBotsTargetId;
+    }
+
+    private bool TryApplyPanelBotRole(Player actor, out string response)
+    {
+        RoleTypeId role = _playerPanelSelectedBotRoles.TryGetValue(actor.PlayerId, out RoleTypeId selectedRole)
+            ? selectedRole
+            : PlayerPanelBotRoles.FirstOrDefault();
+
+        if (role == RoleTypeId.None || role == RoleTypeId.Spectator)
+        {
+            response = WarmupLocalization.T("Choose a valid bot role first.", "请先选择有效的机器人阵营。");
+            return false;
+        }
+
+        int targetId = GetSelectedPanelBotTargetId(actor);
+
+        List<Player> targets = new();
+        if (targetId == PlayerPanelAllBotsTargetId)
+        {
+            targets.AddRange(GetPlayerPanelBotTargets());
+        }
+        else if (TryGetPlayerPanelTargetById(targetId, out Player target)
+            && target != null
+            && IsManagedBot(target))
+        {
+            targets.Add(target);
+        }
+
+        if (targets.Count == 0)
+        {
+            response = WarmupLocalization.T("No managed bot target was found.", "没有找到可修改的机器人。");
+            return false;
+        }
+
+        int changed = 0;
+        foreach (Player bot in targets)
+        {
+            if (bot == null
+                || bot.IsDestroyed
+                || !_managedBots.TryGetValue(bot.PlayerId, out ManagedBotState state))
+            {
+                continue;
+            }
+
+            ApplyPanelBotRole(bot, state, role);
+            changed++;
+        }
+
+        RefreshPlayerPanelSettings(sendToPlayers: true);
+
+        if (changed == 0)
+        {
+            response = WarmupLocalization.T("No managed bot target was found.", "没有找到可修改的机器人。");
+            return false;
+        }
+
+        response = WarmupLocalization.T(
+            $"Set {changed} bot(s) to {role} permanently.",
+            $"已将 {changed} 个机器人永久设置为 {role}。");
+        ApiLogger.Info($"[WarmupSandbox] Player panel botrole actor={actor.Nickname}#{actor.PlayerId} role={role} changed={changed} target={targetId}");
+        return changed > 0;
+    }
+
+    private void ApplyPanelBotRole(Player bot, ManagedBotState state, RoleTypeId role)
+    {
+        state.SpawnSetupCompleted = false;
+        state.ResetNavigationRuntimeState();
+        state.BrainToken++;
+        state.RespawnRole = role;
+        bot.SetRole(role, RoleChangeReason.RemoteAdmin, RoleSpawnFlags.All);
+    }
+
     public bool TryOpenPlayerPanel(Player player, out string response)
     {
         if (!Config.PlayerPanelEnabled)
@@ -3495,38 +4138,11 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             return false;
         }
 
-        long now = NowMs();
-        if (_playerPanelWindowUntilMs.TryGetValue(player.PlayerId, out long activeUntil)
-            && activeUntil > now)
-        {
-            response = BuildPlayerPanel(player, activeUntil);
-            player.SendHint(response, 12f);
-            return true;
-        }
-
-        if (TryGetCooldownRemainingSeconds(_playerPanelGlobalCooldownUntilMs, now, out int globalRemaining))
-        {
-            response = WarmupLocalization.T(
-                $"The player panel is on global cooldown for {globalRemaining}s.",
-                $"玩家面板全局冷却中，还剩 {globalRemaining} 秒。");
-            return false;
-        }
-
-        if (_playerPanelCooldownUntilMs.TryGetValue(player.PlayerId, out long playerCooldownUntil)
-            && TryGetCooldownRemainingSeconds(playerCooldownUntil, now, out int playerRemaining))
-        {
-            response = WarmupLocalization.T(
-                $"You can open the player panel again in {playerRemaining}s.",
-                $"你还需要 {playerRemaining} 秒后才能再次打开玩家面板。");
-            return false;
-        }
-
-        long windowUntil = now + Math.Max(1, Config.PlayerPanelUseWindowSeconds) * 1000L;
-        _playerPanelWindowUntilMs[player.PlayerId] = windowUntil;
-        SchedulePlayerPanelCooldown(player.PlayerId, windowUntil);
-        response = BuildPlayerPanel(player, windowUntil);
-        player.SendHint(response, Math.Min(15f, Math.Max(4f, Config.PlayerPanelUseWindowSeconds)));
-        ApiLogger.Info($"[WarmupSandbox] Player panel opened for {player.Nickname}#{player.PlayerId}.");
+        RefreshPlayerPanelSettings(sendToPlayers: true);
+        response = BuildPlayerPanel(player);
+        ServerSpecificSettingsSync.SendToPlayer(player.ReferenceHub);
+        player.SendHint(response, 6f);
+        ApiLogger.Info($"[WarmupSandbox] Player panel refreshed for {player.Nickname}#{player.PlayerId}.");
         return true;
     }
 
@@ -3540,17 +4156,9 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         string subcommand = GetArgument(arguments, 0).ToLowerInvariant();
         if (subcommand is "help" or "?")
         {
-            response = BuildPlayerPanel(player, NowMs() + 1000L);
+            response = BuildPlayerPanel(player);
             player.SendHint(response, 12f);
             return true;
-        }
-
-        if (!IsPlayerPanelWindowActive(player.PlayerId))
-        {
-            response = WarmupLocalization.T(
-                "Use .panel first to open a 20s command window.",
-                "请先输入 .panel 打开 20 秒指令窗口。");
-            return false;
         }
 
         switch (subcommand)
@@ -3561,8 +4169,8 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                 if (arguments.Count < 3)
                 {
                     response = WarmupLocalization.T(
-                        "Usage: .panel role <playerId|name|me> <role>",
-                        "用法：.panel role <玩家ID|名字|me> <职业>");
+                        "Open Server Specific Settings, or use: panel role <playerId|name|me> <role>",
+                        "打开服务器专属设置（Server Specific Settings），或使用：panel role <玩家ID|名字|me> <阵营>");
                     return false;
                 }
 
@@ -3576,7 +4184,12 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                 {
                     response = WarmupLocalization.T(
                         "Unknown role. Try 173, 939, 106, 049, 3114, 096, ntf, guard, chaos, classd.",
-                        "未知职业。可用 173、939、106、049、3114、096、ntf、guard、chaos、classd。");
+                        "未知阵营。可用 173、939、106、049、3114、096、ntf、guard、chaos、classd。");
+                    return false;
+                }
+
+                if (!TryUsePlayerPanelPersonalCooldown(player, out response))
+                {
                     return false;
                 }
 
@@ -3587,8 +4200,8 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                 if (arguments.Count < 3)
                 {
                     response = WarmupLocalization.T(
-                        "Usage: .panel give <playerId|name|me> <item>",
-                        "用法：.panel give <玩家ID|名字|me> <物品>");
+                        "Open Server Specific Settings, or use: panel give <playerId|name|me> <item>",
+                        "打开服务器专属设置（Server Specific Settings），或使用：panel give <玩家ID|名字|me> <物品>");
                     return false;
                 }
 
@@ -3606,19 +4219,29 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                     return false;
                 }
 
+                if (!TryUsePlayerPanelPersonalCooldown(player, out response))
+                {
+                    return false;
+                }
+
                 return TryPanelGive(player, itemTarget, itemType, out response);
 
             case "bring":
                 if (arguments.Count < 2)
                 {
                     response = WarmupLocalization.T(
-                        "Usage: .panel bring <playerId|name>",
-                        "用法：.panel bring <玩家ID|名字>");
+                        "Open Server Specific Settings, or use: panel bring <playerId|name>",
+                        "打开服务器专属设置（Server Specific Settings），或使用：panel bring <玩家ID|名字>");
                     return false;
                 }
 
                 if (!TryResolvePanelTarget(player, GetArgument(arguments, 1), out Player? bringTarget, out response)
                     || bringTarget == null)
+                {
+                    return false;
+                }
+
+                if (!TryUsePlayerPanelPersonalCooldown(player, out response))
                 {
                     return false;
                 }
@@ -3630,13 +4253,18 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                 if (arguments.Count < 2)
                 {
                     response = WarmupLocalization.T(
-                        "Usage: .panel goto <playerId|name>",
-                        "用法：.panel goto <玩家ID|名字>");
+                        "Open Server Specific Settings, or use: panel goto <playerId|name>",
+                        "打开服务器专属设置（Server Specific Settings），或使用：panel goto <玩家ID|名字>");
                     return false;
                 }
 
                 if (!TryResolvePanelTarget(player, GetArgument(arguments, 1), out Player? gotoTarget, out response)
                     || gotoTarget == null)
+                {
+                    return false;
+                }
+
+                if (!TryUsePlayerPanelPersonalCooldown(player, out response))
                 {
                     return false;
                 }
@@ -3648,53 +4276,44 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                 if (arguments.Count < 2)
                 {
                     response = WarmupLocalization.T(
-                        "Usage: .panel bots <count>",
-                        "用法：.panel bots <数量>");
+                        "Open Server Specific Settings, or use: panel bots <count>",
+                        "打开服务器专属设置（Server Specific Settings），或使用：panel bots <数量>");
                     return false;
                 }
 
-                return TryPlayerSetBotCount(player, GetArgument(arguments, 1), out response);
+                if (!int.TryParse(GetArgument(arguments, 1), out int botCount))
+                {
+                    response = WarmupLocalization.T(
+                        "Open Server Specific Settings, or use: panel bots <count>",
+                        "打开服务器专属设置（Server Specific Settings），或使用：panel bots <数量>");
+                    return false;
+                }
+
+                if (!TryUsePlayerPanelGlobalCooldown(player, out response))
+                {
+                    return false;
+                }
+
+                Config.BotCount = ClampPanelBotCount(botCount);
+                SaveConfig();
+                EnsureBotPopulation(_warmupGeneration);
+                response = WarmupLocalization.T(
+                    $"Bot count set to {Config.BotCount}.",
+                    $"机器人数量已设置为 {Config.BotCount}。");
+                return true;
 
             default:
-                response = BuildPlayerPanel(
-                    player,
-                    _playerPanelWindowUntilMs.TryGetValue(player.PlayerId, out long panelUntil) ? panelUntil : NowMs());
+                response = BuildPlayerPanel(player);
                 player.SendHint(response, 12f);
                 return false;
         }
     }
 
-    private string BuildPlayerPanel(Player player, long windowUntilMs)
+    private string BuildPlayerPanel(Player player)
     {
-        int remainingSeconds = Math.Max(0, (int)Math.Ceiling((windowUntilMs - NowMs()) / 1000.0));
-        string playerRows = string.Join("\n", Player.List
-            .Where(candidate => candidate != null && !candidate.IsDestroyed)
-            .OrderBy(candidate => candidate.PlayerId)
-            .Take(12)
-            .Select(candidate => $"#{candidate.PlayerId} {candidate.Nickname} [{candidate.Role}]"));
-
-        if (string.IsNullOrWhiteSpace(playerRows))
-        {
-            playerRows = WarmupLocalization.T("No players found.", "未找到玩家。");
-        }
-
         return WarmupLocalization.T(
-            $"<size=28><color=#00ffff><b>Warmup Panel</b></color></size>\n" +
-            $"<size=20><color=#cccccc>{remainingSeconds}s window. Type in console:</color></size>\n" +
-            "<align=left><size=18>" +
-            "<color=#ffd166>.panel role <id|me> <173|939|106|049|3114|096|ntf></color>\n" +
-            "<color=#ffd166>.panel give <id|me> <fsp9|com15|crossvec|e11|ak|medkit|ammo9></color>\n" +
-            "<color=#ffd166>.panel bring <id> / .panel goto <id> / .panel bots <count></color>\n" +
-            "<color=#bbbbbb>Players:</color>\n" +
-            $"{playerRows}</size></align>",
-            $"<size=28><color=#00ffff><b>玩家面板</b></color></size>\n" +
-            $"<size=20><color=#cccccc>窗口剩余 {remainingSeconds} 秒。在控制台输入：</color></size>\n" +
-            "<align=left><size=18>" +
-            "<color=#ffd166>.panel role <id|me> <173|939|106|049|3114|096|ntf></color>\n" +
-            "<color=#ffd166>.panel give <id|me> <fsp9|com15|crossvec|e11|ak|medkit|ammo9></color>\n" +
-            "<color=#ffd166>.panel bring <id> / .panel goto <id> / .panel bots <数量></color>\n" +
-            "<color=#bbbbbb>玩家列表：</color>\n" +
-            $"{playerRows}</size></align>");
+            "<size=28><color=#00ffff><b>Warmup GUI enabled</b></color></size>\n<size=20>Open <color=#ffd166>Server Specific Settings</color>. Personal Apply: 10s cooldown. Global Apply: staged server changes with shared cooldown.</size>",
+            "<size=28><color=#00ffff><b>人机面板已开启</b></color></size>\n<size=20>打开<color=#ffd166>服务器专属设置（Server Specific Settings）</color>。个人应用：10 秒冷却；全局应用：先选择再生效，使用共享冷却。</size>");
     }
 
     private bool TryResolvePanelTarget(Player actor, string selector, out Player? target, out string response)
@@ -3710,16 +4329,15 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
 
         if (int.TryParse(normalized.TrimStart('#'), out int playerId)
-            && Player.TryGet(playerId, out Player idMatch)
-            && idMatch != null
-            && !idMatch.IsDestroyed)
+            && TryGetPlayerPanelTargetById(playerId, out Player idMatch)
+            && idMatch != null)
         {
             target = idMatch;
             response = string.Empty;
             return true;
         }
 
-        List<Player> matches = Player.List
+        List<Player> matches = GetPlayerPanelTargets()
             .Where(candidate => candidate != null
                 && !candidate.IsDestroyed
                 && candidate.Nickname.Contains(normalized, StringComparison.OrdinalIgnoreCase))
@@ -3736,8 +4354,30 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         response = matches.Count == 0
             ? WarmupLocalization.T("Player not found.", "未找到玩家。")
             : WarmupLocalization.T(
-                "Multiple players matched. Use the numeric player ID from .panel.",
-                "匹配到多个玩家。请使用 .panel 显示的数字玩家 ID。");
+                "Multiple players matched. Use the numeric player ID from Server Specific Settings.",
+                "匹配到多个玩家。请使用服务器专属设置（Server Specific Settings）中显示的数字玩家 ID。");
+        return false;
+    }
+
+    private bool TryGetPlayerPanelTargetById(int playerId, out Player target)
+    {
+        if (Player.TryGet(playerId, out target)
+            && target != null
+            && !target.IsDestroyed
+            && !target.IsHost)
+        {
+            return true;
+        }
+
+        if (_managedBots.ContainsKey(playerId)
+            && Player.TryGet(playerId, out target)
+            && target != null
+            && !target.IsDestroyed)
+        {
+            return true;
+        }
+
+        target = null!;
         return false;
     }
 
@@ -3765,7 +4405,12 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             _ => RoleTypeId.None,
         };
 
-        return role != RoleTypeId.None || Enum.TryParse(selector, ignoreCase: true, out role);
+        if (role == RoleTypeId.None)
+        {
+            Enum.TryParse(selector, ignoreCase: true, out role);
+        }
+
+        return IsPlayerPanelRoleAllowed(role);
     }
 
     private static bool TryParsePanelItem(string selector, out ItemType itemType)
@@ -3795,21 +4440,37 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             _ => ItemType.None,
         };
 
-        return itemType != ItemType.None || Enum.TryParse(selector, ignoreCase: true, out itemType);
+        if (itemType == ItemType.None)
+        {
+            Enum.TryParse(selector, ignoreCase: true, out itemType);
+        }
+
+        return IsPlayerPanelItemAllowed(itemType);
     }
 
     private bool TryPanelSetRole(Player actor, Player target, RoleTypeId role, out string response)
     {
+        bool wasSpectator = target.Role == RoleTypeId.Spectator;
         Vector3 position = target.Position;
         Vector2 lookRotation = target.LookRotation;
         target.SetRole(role, RoleChangeReason.RemoteAdmin, RoleSpawnFlags.All);
-        RestorePanelRolePosition(target.PlayerId, role, position, lookRotation, 50);
-        RestorePanelRolePosition(target.PlayerId, role, position, lookRotation, 250);
-        response = WarmupLocalization.T(
-            $"Set {target.Nickname} to {role} in place.",
-            $"已将 {target.Nickname} 原地设置为 {role}。");
+        if (!wasSpectator && role != RoleTypeId.Spectator)
+        {
+            RestorePanelRolePosition(target.PlayerId, role, position, lookRotation, 50);
+            RestorePanelRolePosition(target.PlayerId, role, position, lookRotation, 250);
+            response = WarmupLocalization.T(
+                $"Set {target.Nickname} to {role} in place.",
+                $"已将 {target.Nickname} 原地设置为阵营 {role}。");
+        }
+        else
+        {
+            response = WarmupLocalization.T(
+                $"Set {target.Nickname} to {role} using the default spawnpoint.",
+                $"已将 {target.Nickname} 设置为阵营 {role}，并使用默认出生点。");
+        }
+
         actor.SendHint(response, 4f);
-        ApiLogger.Info($"[WarmupSandbox] Player panel role actor={actor.Nickname}#{actor.PlayerId} target={target.Nickname}#{target.PlayerId} role={role}");
+        ApiLogger.Info($"[WarmupSandbox] Player panel role actor={actor.Nickname}#{actor.PlayerId} target={target.Nickname}#{target.PlayerId} role={role} wasSpectator={wasSpectator}");
         return true;
     }
 
@@ -3864,13 +4525,99 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     private bool TryPanelBring(Player actor, Player target, out string response)
     {
+        if (!IsManagedBot(target)
+            || !_managedBots.TryGetValue(target.PlayerId, out ManagedBotState state))
+        {
+            response = WarmupLocalization.T(
+                "Only bots can be brought.",
+                "只能召回服务器机器人。");
+            actor.SendHint(response, 4f);
+            return false;
+        }
+
         target.Position = actor.Position + GetForwardOrDefault(actor);
+        state.LastPosition = target.Position;
+        state.ResetNavigationRuntimeState();
         response = WarmupLocalization.T(
             $"Brought {target.Nickname}.",
             $"已传送 {target.Nickname} 到你身边。");
         actor.SendHint(response, 4f);
         ApiLogger.Info($"[WarmupSandbox] Player panel bring actor={actor.Nickname}#{actor.PlayerId} target={target.Nickname}#{target.PlayerId}");
         return true;
+    }
+
+    private bool TryPanelBringBots(Player actor, int targetId, out string response)
+    {
+        if (actor.Role == RoleTypeId.Spectator)
+        {
+            response = WarmupLocalization.T(
+                "Spawn first before bringing bots.",
+                "请先出生，再召回机器人。");
+            actor.SendHint(response, 4f);
+            return false;
+        }
+
+        List<Player> bots = new();
+        if (targetId == PlayerPanelAllBotsTargetId)
+        {
+            bots.AddRange(GetPlayerPanelBotTargets());
+        }
+        else if (TryGetPlayerPanelTargetById(targetId, out Player target)
+            && target != null
+            && IsManagedBot(target))
+        {
+            bots.Add(target);
+        }
+
+        if (bots.Count == 0)
+        {
+            response = WarmupLocalization.T(
+                "No selected bot is alive.",
+                "当前没有可召回的机器人。");
+            actor.SendHint(response, 4f);
+            return false;
+        }
+
+        Vector3 origin = actor.Position;
+        Vector3 forward = GetPlanarDirection(GetForwardOrDefault(actor), Vector3.forward);
+        Vector3 right = GetPlanarDirection(GetRightOrDefault(actor), Vector3.right);
+        int changed = 0;
+
+        for (int index = 0; index < bots.Count; index++)
+        {
+            Player bot = bots[index];
+            if (bot == null
+                || bot.IsDestroyed
+                || !_managedBots.TryGetValue(bot.PlayerId, out ManagedBotState state))
+            {
+                continue;
+            }
+
+            double angle = bots.Count <= 1 ? 0.0 : (Math.PI * 2.0 * index) / bots.Count;
+            float radius = 1.75f + 0.5f * (index / 8);
+            Vector3 offset = (forward * (float)Math.Cos(angle) + right * (float)Math.Sin(angle)) * radius;
+            Vector3 position = origin + offset;
+            bot.Position = position;
+            state.LastPosition = position;
+            state.ResetNavigationRuntimeState();
+            changed++;
+        }
+
+        if (changed == 0)
+        {
+            response = WarmupLocalization.T(
+                "No bot could be brought.",
+                "没有可召回的机器人。");
+            actor.SendHint(response, 4f);
+            return false;
+        }
+
+        response = WarmupLocalization.T(
+            $"Brought {changed} bot(s) to you.",
+            $"已召回 {changed} 个机器人到你身边。");
+        actor.SendHint(response, 4f);
+        ApiLogger.Info($"[WarmupSandbox] Player panel bringbots actor={actor.Nickname}#{actor.PlayerId} changed={changed} target={targetId}");
+        return changed > 0;
     }
 
     private bool TryPanelGoto(Player actor, Player target, out string response)
@@ -3887,6 +4634,77 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private static Vector3 GetForwardOrDefault(Player player)
     {
         return player.GameObject == null ? Vector3.forward : player.GameObject.transform.forward;
+    }
+
+    private static Vector3 GetRightOrDefault(Player player)
+    {
+        return player.GameObject == null ? Vector3.right : player.GameObject.transform.right;
+    }
+
+    private static Vector3 GetPlanarDirection(Vector3 direction, Vector3 fallback)
+    {
+        direction.y = 0f;
+        if (direction.sqrMagnitude < 0.0001f)
+        {
+            direction = fallback;
+        }
+
+        return direction.normalized;
+    }
+
+    private static int ClampPanelBotCount(int count)
+    {
+        return Math.Max(0, Math.Min(30, count));
+    }
+
+    private static float ClampCloseRetreatSpeedScale(float scale)
+    {
+        return Mathf.Clamp(scale, 0.6f, 1.0f);
+    }
+
+    private bool TryUsePlayerPanelPersonalCooldown(Player player, out string response)
+    {
+        long now = NowMs();
+        if (_playerPanelPersonalCooldownUntilMs.TryGetValue(player.PlayerId, out long cooldownUntil)
+            && TryGetCooldownRemainingSeconds(cooldownUntil, now, out int remaining))
+        {
+            response = WarmupLocalization.T(
+                $"Personal panel action cooldown: {remaining}s.",
+                $"个人面板操作冷却中：{remaining} 秒。");
+            return false;
+        }
+
+        _playerPanelPersonalCooldownUntilMs[player.PlayerId] = now + PlayerPanelPersonalCooldownSeconds * 1000L;
+        response = string.Empty;
+        return true;
+    }
+
+    private bool TryUsePlayerPanelGlobalCooldown(Player player, out string response)
+    {
+        long now = NowMs();
+        if (TryGetCooldownRemainingSeconds(_playerPanelGlobalCooldownUntilMs, now, out int globalRemaining))
+        {
+            response = WarmupLocalization.T(
+                $"Global panel action cooldown: {globalRemaining}s.",
+                $"全局面板操作冷却中：{globalRemaining} 秒。");
+            return false;
+        }
+
+        if (_playerPanelCooldownUntilMs.TryGetValue(player.PlayerId, out long playerCooldownUntil)
+            && TryGetCooldownRemainingSeconds(playerCooldownUntil, now, out int playerRemaining))
+        {
+            response = WarmupLocalization.T(
+                $"You can apply another global setting in {playerRemaining}s.",
+                $"你还需要 {playerRemaining} 秒后才能再次应用全局设置。");
+            return false;
+        }
+
+        _playerPanelGlobalCooldownUntilMs = now + Math.Max(0, Config.PlayerPanelGlobalCooldownSeconds) * 1000L;
+        _playerPanelCooldownUntilMs[player.PlayerId] = now + BuildCooldownMs(
+            Config.PlayerPanelCooldownSeconds,
+            Config.PlayerPanelCooldownJitterSeconds);
+        response = string.Empty;
+        return true;
     }
 
     private bool IsPlayerPanelWindowActive(int playerId)
@@ -4141,18 +4959,18 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     public bool SetCloseRetreatSpeedScale(string rawValue, out string response)
     {
-        if (!float.TryParse(rawValue, out float scale) || scale <= 0f || scale > 2f)
+        if (!float.TryParse(rawValue, out float scale))
         {
             response = WarmupLocalization.T(
-                "Retreat speed scale must be a number greater than 0 and no more than 2.",
-                "后退速度倍率必须大于 0 且不超过 2。");
+                "Retreat speed scale must be a number from 0.6 to 1.",
+                "后退速度倍率必须是 0.6 到 1 之间的数字。");
             return false;
         }
 
-        Config.BotBehavior.CloseRetreatSpeedScale = scale;
+        Config.BotBehavior.CloseRetreatSpeedScale = ClampCloseRetreatSpeedScale(scale);
         response = WarmupLocalization.T(
-            $"Close retreat speed scale set to {scale:F2}.",
-            $"近距离后退速度倍率已设置为 {scale:F2}。");
+            $"Close retreat speed scale set to {Config.BotBehavior.CloseRetreatSpeedScale:F2}.",
+            $"近距离后退速度倍率已设置为 {Config.BotBehavior.CloseRetreatSpeedScale:F2}。");
         return true;
     }
 

@@ -115,6 +115,7 @@ internal sealed class BotControllerService
                     behavior,
                     random,
                     useDust2Arena,
+                    canUseScpAttack,
                     tryInvokeDummyActions,
                     tryInvokeDummyAction,
                     logNavDebug,
@@ -315,6 +316,7 @@ internal sealed class BotControllerService
         BotBehaviorDefinition behavior,
         System.Random random,
         bool useDust2Arena,
+        bool allowForwardRecoveryJump,
         Func<Player, IEnumerable<string>, bool> tryInvokeDummyActions,
         Func<Player, string, bool> tryInvokeDummyAction,
         Action<Player, ManagedBotState, string> logNavDebug,
@@ -372,7 +374,7 @@ internal sealed class BotControllerService
         if (TryMoveTowardDirection(bot, patrolDirection, behavior, tryInvokeDummyActions, allowBackward: false, out string moveLabel))
         {
             RecordMoveIntent(state, $"patrol-{moveLabel}", nowTick);
-            MaybeTriggerForwardRecoveryJump(bot, state, behavior, tryInvokeDummyActions, nowTick);
+            MaybeTriggerForwardRecoveryJump(bot, state, behavior, tryInvokeDummyActions, nowTick, allowForwardRecoveryJump);
             MaybeLogNavigationExecution(bot, state, null, behavior, false, false, moveGoal, "patrol", logNavDebug, nowTick);
             return true;
         }
@@ -635,7 +637,7 @@ internal sealed class BotControllerService
             if (TryMoveTowardDirection(bot, orbitDirection, behavior, tryInvokeDummyActions, allowBackward: retreatingFromCloseTarget, out string orbitMoveLabel))
             {
                 RecordMoveIntent(state, orbitMoveLabel, nowTick);
-                MaybeTriggerForwardRecoveryJump(bot, state, behavior, tryInvokeDummyActions, nowTick);
+                MaybeTriggerForwardRecoveryJump(bot, state, behavior, tryInvokeDummyActions, nowTick, useScpForwardStrafe);
             }
             else
             {
@@ -656,6 +658,7 @@ internal sealed class BotControllerService
             if (TryMoveForwardOnNavigationPath(bot, purePathDirection, behavior, tryInvokeDummyActions, out string pathMoveLabel, navStepDistance))
             {
                 RecordMoveIntent(state, pathMoveLabel, nowTick);
+                MaybeTriggerForwardRecoveryJump(bot, state, behavior, tryInvokeDummyActions, nowTick, useScpForwardStrafe);
                 LogNavigationMove(bot, state, behavior, target, navTarget, navDistance, navStepDistance, pathMoveLabel, "nav-path", logNavDebug, nowTick);
                 return;
             }
@@ -686,7 +689,7 @@ internal sealed class BotControllerService
         if (TryMoveTowardDirection(bot, chaseDirection, behavior, tryInvokeDummyActions, allowBackward: false, out string chaseMoveLabel))
         {
             RecordMoveIntent(state, chaseMoveLabel, nowTick);
-            MaybeTriggerForwardRecoveryJump(bot, state, behavior, tryInvokeDummyActions, nowTick);
+            MaybeTriggerForwardRecoveryJump(bot, state, behavior, tryInvokeDummyActions, nowTick, useScpForwardStrafe);
             if (applyChaseStrafe)
             {
                 ApplyStrafeBurst(bot, state, behavior, tryInvokeDummyActions, random, useScpForwardStrafe);
@@ -700,7 +703,7 @@ internal sealed class BotControllerService
         if (TryMoveTowardDirection(bot, directDirection, behavior, tryInvokeDummyActions, allowBackward: false, out string directMoveLabel))
         {
             RecordMoveIntent(state, directMoveLabel, nowTick);
-            MaybeTriggerForwardRecoveryJump(bot, state, behavior, tryInvokeDummyActions, nowTick);
+            MaybeTriggerForwardRecoveryJump(bot, state, behavior, tryInvokeDummyActions, nowTick, useScpForwardStrafe);
             if (ShouldApplyChaseStrafe(state, target, nowTick))
             {
                 ApplyStrafeBurst(bot, state, behavior, tryInvokeDummyActions, random, useScpForwardStrafe);
@@ -1243,7 +1246,7 @@ internal sealed class BotControllerService
 
     private static float GetCloseRetreatSpeedScale(BotBehaviorDefinition behavior)
     {
-        return Mathf.Clamp(behavior.CloseRetreatSpeedScale, 0.1f, 2.0f);
+        return Mathf.Clamp(behavior.CloseRetreatSpeedScale, 0.6f, 1.0f);
     }
 
     private static float GetClearStepDistance(Player bot, Vector3 direction, BotBehaviorDefinition behavior)
@@ -2185,7 +2188,8 @@ internal sealed class BotControllerService
         ManagedBotState state,
         BotBehaviorDefinition behavior,
         Func<Player, IEnumerable<string>, bool> tryInvokeDummyActions,
-        int nowTick)
+        int nowTick,
+        bool allowJump)
     {
         if (state.LastMoveIntentLabel != "forward"
             || state.ForwardStallSinceTick == 0
@@ -2205,6 +2209,15 @@ internal sealed class BotControllerService
         }
 
         state.NextForwardJumpTick = nowTick + Math.Max(MinimumForwardJumpIntervalMs, behavior.ForwardStuckJumpIntervalMs);
+        if (allowJump && behavior.JumpActionNames is { Length: > 0 })
+        {
+            int jumpBursts = Math.Max(1, behavior.ForwardStuckJumpBurstCount);
+            for (int i = 0; i < jumpBursts; i++)
+            {
+                tryInvokeDummyActions(bot, behavior.JumpActionNames);
+            }
+        }
+
         TryApplyForwardRecoverySidestep(bot, state, behavior, tryInvokeDummyActions, nowTick);
     }
 
