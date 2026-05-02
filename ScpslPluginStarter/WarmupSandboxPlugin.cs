@@ -537,6 +537,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         int generation = _warmupGeneration;
         ScheduleNavHeartbeat(generation);
         ScheduleAutoCleanup(generation);
+        ScheduleHelpReminderBroadcast(generation);
         Schedule(() => SetupWarmup(generation), Config.InitialSetupDelayMs);
     }
 
@@ -2636,6 +2637,37 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         long configuredDelayMs = (long)Config.AutoCleanupIntervalSeconds * 1000L;
         int delayMs = (int)Math.Min(int.MaxValue, Math.Max(MinimumAutoCleanupIntervalMs, configuredDelayMs));
         Schedule(() => RunAutoCleanup(generation), delayMs);
+    }
+
+    private void ScheduleHelpReminderBroadcast(int generation)
+    {
+        if (!Config.BroadcastHelpReminder || Config.HelpReminderIntervalSeconds <= 0 || Config.HelpReminderDurationSeconds <= 0)
+        {
+            return;
+        }
+
+        long configuredDelayMs = (long)Config.HelpReminderIntervalSeconds * 1000L;
+        int delayMs = (int)Math.Min(int.MaxValue, Math.Max(5000L, configuredDelayMs));
+        Schedule(() => RunHelpReminderBroadcast(generation), delayMs);
+    }
+
+    private void RunHelpReminderBroadcast(int generation)
+    {
+        if (!IsCurrentGeneration(generation) || !_warmupActive)
+        {
+            return;
+        }
+
+        string text = WarmupLocalization.T(
+            "<size=28><color=#00ffff><b>Use .help for commands</b></color></size>\n<size=22>.loadout / .bots setcount / .ra limited panel</size>",
+            "<size=28><color=#00ffff><b>输入 .help 查看命令</b></color></size>\n<size=22>.loadout / .bots setcount / .ra 受限面板</size>");
+
+        foreach (Player player in Player.List.Where(IsManagedHuman))
+        {
+            player.SendBroadcast(text, Config.HelpReminderDurationSeconds, global::Broadcast.BroadcastFlags.Normal, true);
+        }
+
+        ScheduleHelpReminderBroadcast(generation);
     }
 
     private void RunAutoCleanup(int generation)

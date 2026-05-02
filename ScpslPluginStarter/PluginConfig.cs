@@ -19,6 +19,12 @@ public sealed class PluginConfig
 
     public bool BroadcastWarmupStatus { get; set; } = true;
 
+    public bool BroadcastHelpReminder { get; set; } = true;
+
+    public int HelpReminderIntervalSeconds { get; set; } = 45;
+
+    public ushort HelpReminderDurationSeconds { get; set; } = 6;
+
     public string Language { get; set; } = "en";
 
     public bool EnableDebugLogging { get; set; } = false;

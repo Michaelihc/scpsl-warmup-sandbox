@@ -4,6 +4,9 @@ auto_start_on_round_started: true
 force_round_start_on_first_player: true
 suppress_round_end: true
 broadcast_warmup_status: true
+broadcast_help_reminder: true
+help_reminder_interval_seconds: 45
+help_reminder_duration_seconds: 6
 language: en
 enable_debug_logging: false
 enable_verbose_bot_logging: false
