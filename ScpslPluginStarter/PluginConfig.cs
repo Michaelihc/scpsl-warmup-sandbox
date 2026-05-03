@@ -346,7 +346,7 @@ public sealed class Dust2MapConfig
 
     public float RuntimeNavMeshMinRegionArea { get; set; } = 0.5f;
 
-    public bool VisualizeRuntimeNavMesh { get; set; } = true;
+    public bool VisualizeRuntimeNavMesh { get; set; } = false;
 
     public int RuntimeNavMeshMaxDebugEdges { get; set; } = 6000;
 
@@ -642,13 +642,21 @@ public sealed class BotBehaviorDefinition
 
     public float NavMeshStuckDoorTeleportSampleDistance { get; set; } = 4.0f;
 
-    public bool NavMeshLocalDetourEnabled { get; set; } = false;
+    public bool NavMeshLocalDetourEnabled { get; set; } = true;
 
     public float NavMeshLocalDetourForwardDistance { get; set; } = 1.6f;
 
     public float NavMeshLocalDetourLateralDistance { get; set; } = 2.0f;
 
     public float NavMeshLocalDetourMaxWaypointDistance { get; set; } = 14.0f;
+
+    public bool LongRangeRandomRoomTeleportEnabled { get; set; } = true;
+
+    public float LongRangeRandomRoomTeleportDistance { get; set; } = 35.0f;
+
+    public int LongRangeRandomRoomTeleportCooldownMs { get; set; } = 7000;
+
+    public float LongRangeRandomRoomTeleportSampleDistance { get; set; } = 6.0f;
 
     public bool NavDebugLogging { get; set; } = false;
 
@@ -710,11 +718,11 @@ public sealed class BotBehaviorDefinition
 
     public float NearbyBotAvoidanceRadius { get; set; } = 1.35f;
 
-    public int ForwardStuckJumpThresholdMs { get; set; } = 3500;
+    public int ForwardStuckJumpThresholdMs { get; set; } = 200;
 
     public int ForwardStuckJumpIntervalMs { get; set; } = 1000;
 
-    public int ForwardStuckJumpBurstCount { get; set; } = 2;
+    public int ForwardStuckJumpBurstCount { get; set; } = 1;
 
     public int MaxHorizontalAimActionsPerTick { get; set; } = 3;
 

@@ -173,7 +173,7 @@ dust2_map:
   runtime_nav_mesh_sample_distance: 3.0
   runtime_nav_mesh_bounds_padding: 6.0
   runtime_nav_mesh_min_region_area: 0.5
-  visualize_runtime_nav_mesh: true
+  visualize_runtime_nav_mesh: false
   runtime_nav_mesh_max_debug_edges: 6000
   runtime_nav_mesh_debug_edge_width: 0.035
   runtime_nav_mesh_debug_height_offset: 0.06
@@ -225,17 +225,17 @@ bot_behavior:
   facility_runtime_nav_mesh_off_mesh_link_sample_distance: 6.0
   facility_runtime_nav_mesh_off_mesh_link_width: 0.4
   facility_runtime_nav_mesh_off_mesh_link_cost_modifier: 2
-  visualize_facility_nav_mesh: true
+  visualize_facility_nav_mesh: false
   facility_runtime_nav_mesh_max_debug_edges: 12000
   facility_runtime_nav_mesh_debug_edge_width: 0.025
   facility_runtime_nav_mesh_debug_height_offset: 0.08
-  visualize_facility_nav_mesh_samples: true
+  visualize_facility_nav_mesh_samples: false
   facility_runtime_nav_mesh_max_debug_samples: 2500
   facility_runtime_nav_mesh_debug_sample_spacing: 2.5
   facility_runtime_nav_mesh_debug_sample_radius: 18.0
   facility_runtime_nav_mesh_debug_sample_distance: 12.0
   facility_runtime_nav_mesh_debug_sample_size: 0.3
-  visualize_facility_nav_agents: true
+  visualize_facility_nav_agents: false
   facility_nav_agent_debug_marker_size: 0.65
   use_facility_dummy_follow_fallback: true
   facility_nav_mesh_direct_position_control: false
@@ -321,10 +321,14 @@ bot_behavior:
   nav_mesh_stuck_door_teleport_stuck_ms: 15000
   nav_mesh_stuck_door_teleport_cooldown_ms: 7000
   nav_mesh_stuck_door_teleport_sample_distance: 4.0
-  nav_mesh_local_detour_enabled: false
+  nav_mesh_local_detour_enabled: true
   nav_mesh_local_detour_forward_distance: 1.6
   nav_mesh_local_detour_lateral_distance: 2.0
   nav_mesh_local_detour_max_waypoint_distance: 14.0
+  long_range_random_room_teleport_enabled: true
+  long_range_random_room_teleport_distance: 35.0
+  long_range_random_room_teleport_cooldown_ms: 7000
+  long_range_random_room_teleport_sample_distance: 6.0
   nav_debug_logging: true
   navigation_execution_log_interval_ms: 750
   enable_a_star_fallback_navigation: true
@@ -345,9 +349,9 @@ bot_behavior:
   range_tolerance: 2.25
   stuck_distance_threshold: 0.45
   nearby_bot_avoidance_radius: 1.35
-  forward_stuck_jump_threshold_ms: 3500
+  forward_stuck_jump_threshold_ms: 200
   forward_stuck_jump_interval_ms: 1000
-  forward_stuck_jump_burst_count: 2
+  forward_stuck_jump_burst_count: 1
   max_horizontal_aim_actions_per_tick: 3
   max_vertical_aim_actions_per_tick: 2
   horizontal_aim_deadzone_degrees: 1.5

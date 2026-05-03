@@ -698,11 +698,17 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
         if (Config.BroadcastWarmupStatus)
         {
+            string statusText = Config.PlayerPanelEnabled
+                ? WarmupLocalization.T(
+                    $"{Name} active: {Config.BotCount} bots. Open Server Specific Settings for controls.",
+                    $"{Name} 已启用：{Config.BotCount} 个机器人。打开服务器专属设置使用控制。")
+                : WarmupLocalization.T(
+                    $"{Name} active: {Config.BotCount} bots.",
+                    $"{Name} 已启用：{Config.BotCount} 个机器人。");
+
             foreach (Player player in Player.List.Where(IsManagedHuman))
             {
-                player.SendHint(WarmupLocalization.T(
-                    $"{Name} active: {Config.BotCount} bots. Use .help for commands.",
-                    $"{Name} 已启用：{Config.BotCount} 个机器人。输入 .help 查看命令。"), 4f);
+                player.SendHint(statusText, 4f);
             }
         }
     }
@@ -2818,7 +2824,10 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     private void ScheduleHelpReminderBroadcast(int generation)
     {
-        if (!Config.BroadcastHelpReminder || Config.HelpReminderIntervalSeconds <= 0 || Config.HelpReminderDurationSeconds <= 0)
+        if (!Config.PlayerPanelEnabled
+            || !Config.BroadcastHelpReminder
+            || Config.HelpReminderIntervalSeconds <= 0
+            || Config.HelpReminderDurationSeconds <= 0)
         {
             return;
         }
@@ -2830,14 +2839,14 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     private void RunHelpReminderBroadcast(int generation)
     {
-        if (!IsCurrentGeneration(generation) || !_warmupActive)
+        if (!IsCurrentGeneration(generation) || !_warmupActive || !Config.PlayerPanelEnabled)
         {
             return;
         }
 
         string text = WarmupLocalization.T(
-            "<size=28><color=#00ffff><b>Use .help for commands</b></color></size>\n<size=22>Open Server Specific Settings for the bot console</size>",
-            "<size=28><color=#00ffff><b>输入 .help 查看命令</b></color></size>\n<size=22>打开服务器专属设置（Server Specific Settings）使用人机控制台</size>");
+            "<size=28><color=#00ffff><b>Warmup controls</b></color></size>\n<size=22>Open Server Specific Settings for the bot console</size>",
+            "<size=28><color=#00ffff><b>热身控制</b></color></size>\n<size=22>打开服务器专属设置（Server Specific Settings）使用人机控制台</size>");
 
         foreach (Player player in Player.List.Where(IsManagedHuman))
         {
@@ -3298,79 +3307,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     private void UpdateNavAgentDebugVisual(Player bot, ManagedBotState state, bool useNavMesh, bool useDust2Arena)
     {
-        if (useDust2Arena
-            || !useNavMesh
-            || !Config.BotBehavior.VisualizeFacilityNavAgents)
-        {
-            DestroyNavAgentDebugToy(bot.PlayerId);
-            return;
-        }
-
-        NavMeshAgent? agent = state.NavigationAgent;
-        if (agent == null || !agent.enabled)
-        {
-            DestroyNavAgentDebugToy(bot.PlayerId);
-            return;
-        }
-
-        Vector3 markerPosition;
-        Color markerColor;
-        if (agent.isOnNavMesh)
-        {
-            markerPosition = agent.nextPosition;
-            markerColor = new Color(1.0f, 0.0f, 1.0f, 0.95f);
-        }
-        else
-        {
-            markerPosition = agent.transform.position;
-            markerColor = new Color(1.0f, 0.9f, 0.0f, 0.95f);
-        }
-
-        float size = Mathf.Max(0.15f, Config.BotBehavior.FacilityNavAgentDebugMarkerSize);
-        markerPosition += Vector3.up * Mathf.Max(0.2f, Config.BotBehavior.FacilityRuntimeNavMeshDebugHeightOffset + 0.45f);
-
-        if (!_navAgentDebugToys.TryGetValue(bot.PlayerId, out PrimitiveObjectToyWrapper toy)
-            || toy == null
-            || toy.IsDestroyed)
-        {
-            toy = SpawnNavAgentDebugToy(markerPosition, size, markerColor);
-            if (toy == null)
-            {
-                return;
-            }
-
-            _navAgentDebugToys[bot.PlayerId] = toy;
-        }
-
-        toy.Position = markerPosition;
-        toy.Scale = new Vector3(size, Mathf.Max(size, size * 1.8f), size);
-        toy.Color = markerColor;
-    }
-
-    private PrimitiveObjectToyWrapper? SpawnNavAgentDebugToy(Vector3 position, float size, Color color)
-    {
-        try
-        {
-            PrimitiveObjectToyWrapper toy = PrimitiveObjectToyWrapper.Create(
-                position,
-                Quaternion.identity,
-                new Vector3(size, Mathf.Max(size, size * 1.8f), size),
-                null!,
-                false);
-            toy.Type = PrimitiveType.Cube;
-            toy.Color = color;
-            toy.Flags = PrimitiveFlags.Visible;
-            toy.IsStatic = false;
-            toy.MovementSmoothing = 0;
-            toy.SyncInterval = 0.05f;
-            toy.Spawn();
-            return toy;
-        }
-        catch (Exception ex)
-        {
-            ApiLogger.Warn($"[{Name}] Failed to spawn facility NavMesh agent debug marker: {ex.Message}");
-            return null;
-        }
+        DestroyNavAgentDebugToy(bot.PlayerId);
     }
 
     private void DestroyNavAgentDebugToy(int playerId)
@@ -3397,139 +3334,11 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private void RebuildRuntimeNavMeshDebugVisuals()
     {
         ClearArenaDebugVisuals();
-        if (!Config.Dust2Map.VisualizeRuntimeNavMesh || !_dust2MapService.HasRuntimeNavMesh)
-        {
-            return;
-        }
-
-        IReadOnlyList<NavMeshDebugEdge> edges = _dust2MapService.GetRuntimeNavMeshDebugEdges(Config.Dust2Map.RuntimeNavMeshMaxDebugEdges);
-        foreach (NavMeshDebugEdge edge in edges)
-        {
-            PrimitiveObjectToyWrapper? toy = SpawnDebugEdge(
-                edge.Start + (Vector3.up * Config.Dust2Map.RuntimeNavMeshDebugHeightOffset),
-                edge.End + (Vector3.up * Config.Dust2Map.RuntimeNavMeshDebugHeightOffset),
-                Mathf.Max(0.01f, Config.Dust2Map.RuntimeNavMeshDebugEdgeWidth),
-                new Color(0.0f, 0.85f, 1f, 0.82f));
-            if (toy != null)
-            {
-                _runtimeNavMeshDebugEdges.Add(toy);
-            }
-        }
-
-        if (Config.EnableArenaLogging)
-        {
-            ApiLogger.Info($"[{Name}] [NavMeshDebug] rendered {_runtimeNavMeshDebugEdges.Count}/{edges.Count} runtime NavMesh edges.");
-        }
     }
 
     private void RebuildFacilityNavMeshDebugVisuals()
     {
         ClearArenaDebugVisuals();
-        if (!Config.BotBehavior.VisualizeFacilityNavMesh)
-        {
-            return;
-        }
-
-        IReadOnlyList<NavMeshDebugEdge> edges = _facilityNavMeshService.HasRuntimeNavMesh
-            ? _facilityNavMeshService.GetRuntimeNavMeshDebugEdges(Config.BotBehavior.FacilityRuntimeNavMeshMaxDebugEdges)
-            : Array.Empty<NavMeshDebugEdge>();
-        foreach (NavMeshDebugEdge edge in edges)
-        {
-            PrimitiveObjectToyWrapper? toy = SpawnDebugEdge(
-                edge.Start + (Vector3.up * Config.BotBehavior.FacilityRuntimeNavMeshDebugHeightOffset),
-                edge.End + (Vector3.up * Config.BotBehavior.FacilityRuntimeNavMeshDebugHeightOffset),
-                Mathf.Max(0.01f, Config.BotBehavior.FacilityRuntimeNavMeshDebugEdgeWidth),
-                new Color(0.1f, 1.0f, 0.25f, 0.72f));
-            if (toy != null)
-            {
-                _runtimeNavMeshDebugEdges.Add(toy);
-            }
-        }
-
-        IReadOnlyList<NavMeshDebugSample> samples = Config.BotBehavior.VisualizeFacilityNavMeshSamples
-            ? _facilityNavMeshService.GetLoadedNavMeshDebugSamples(
-                Config.BotBehavior.FacilityRuntimeNavMeshMaxDebugSamples,
-                Config.BotBehavior.FacilityRuntimeNavMeshDebugSampleSpacing,
-                Config.BotBehavior.FacilityRuntimeNavMeshDebugSampleRadius,
-                Config.BotBehavior.FacilityRuntimeNavMeshDebugSampleDistance)
-            : Array.Empty<NavMeshDebugSample>();
-        foreach (NavMeshDebugSample sample in samples)
-        {
-            PrimitiveObjectToyWrapper? toy = SpawnDebugPoint(
-                sample.Position + (Vector3.up * Config.BotBehavior.FacilityRuntimeNavMeshDebugHeightOffset),
-                Mathf.Max(0.04f, Config.BotBehavior.FacilityRuntimeNavMeshDebugSampleSize),
-                new Color(0.0f, 1.0f, 0.15f, 0.62f));
-            if (toy != null)
-            {
-                _runtimeNavMeshDebugEdges.Add(toy);
-            }
-        }
-
-        if (Config.BotBehavior.FacilityRuntimeNavMeshLogBuild || Config.BotBehavior.NavDebugLogging)
-        {
-            ApiLogger.Info(
-                $"[{Name}] [FacilityNavMeshDebug] rendered runtimeEdges={edges.Count} sampledPoints={samples.Count} toys={_runtimeNavMeshDebugEdges.Count}. " +
-                $"{_facilityNavMeshService.BuildStatus(Config.BotBehavior)} {_facilityNavMeshService.BuildTriangulationStatus()}");
-        }
-    }
-
-    private PrimitiveObjectToyWrapper? SpawnDebugEdge(Vector3 start, Vector3 end, float width, Color color)
-    {
-        Vector3 delta = end - start;
-        float length = delta.magnitude;
-        if (length <= 0.03f)
-        {
-            return null;
-        }
-
-        try
-        {
-            PrimitiveObjectToyWrapper toy = PrimitiveObjectToyWrapper.Create(
-                Vector3.Lerp(start, end, 0.5f),
-                Quaternion.LookRotation(delta.normalized, Vector3.up),
-                new Vector3(width, width, length),
-                null!,
-                false);
-            toy.Type = PrimitiveType.Cube;
-            toy.Color = color;
-            toy.Flags = PrimitiveFlags.Visible;
-            toy.IsStatic = true;
-            toy.MovementSmoothing = 0;
-            toy.SyncInterval = 0.5f;
-            toy.Spawn();
-            return toy;
-        }
-        catch (Exception ex)
-        {
-            ApiLogger.Warn($"[{Name}] Failed to spawn runtime NavMesh debug edge: {ex.Message}");
-            return null;
-        }
-    }
-
-    private PrimitiveObjectToyWrapper? SpawnDebugPoint(Vector3 position, float size, Color color)
-    {
-        try
-        {
-            PrimitiveObjectToyWrapper toy = PrimitiveObjectToyWrapper.Create(
-                position,
-                Quaternion.identity,
-                new Vector3(size, Mathf.Max(0.01f, size * 0.25f), size),
-                null!,
-                false);
-            toy.Type = PrimitiveType.Cube;
-            toy.Color = color;
-            toy.Flags = PrimitiveFlags.Visible;
-            toy.IsStatic = true;
-            toy.MovementSmoothing = 0;
-            toy.SyncInterval = 0.5f;
-            toy.Spawn();
-            return toy;
-        }
-        catch (Exception ex)
-        {
-            ApiLogger.Warn($"[{Name}] Failed to spawn runtime NavMesh debug point: {ex.Message}");
-            return null;
-        }
     }
 
     private static void DestroyDebugToys(IEnumerable<PrimitiveObjectToyWrapper> toys)
@@ -3816,6 +3625,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     {
         if (!Config.PlayerPanelEnabled)
         {
+            ClearPlayerPanelSettings(sendToPlayers);
             return;
         }
 
@@ -3959,10 +3769,33 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             .ToArray();
     }
 
+    private static bool IsPlayerPanelSetting(ServerSpecificSettingBase setting)
+    {
+        return setting.SettingId >= PlayerPanelFirstSettingId && setting.SettingId <= PlayerPanelLastSettingId;
+    }
+
+    private void ClearPlayerPanelSettings(bool sendToPlayers)
+    {
+        ServerSpecificSettingBase[] currentSettings = ServerSpecificSettingsSync.DefinedSettings ?? Array.Empty<ServerSpecificSettingBase>();
+        ServerSpecificSettingsSync.DefinedSettings = currentSettings
+            .Where(setting => setting != null && !IsPlayerPanelSetting(setting))
+            .ToArray();
+
+        if (sendToPlayers)
+        {
+            ServerSpecificSettingsSync.SendToAll();
+        }
+    }
+
     private void OnServerSpecificSettingValueReceived(ReferenceHub hub, ServerSpecificSettingBase setting)
     {
         Player actor = hub == null ? null! : Player.Get(hub);
         if (hub == null || setting == null || actor == null || actor.IsDestroyed)
+        {
+            return;
+        }
+
+        if (!Config.PlayerPanelEnabled || !IsPlayerPanelSetting(setting))
         {
             return;
         }

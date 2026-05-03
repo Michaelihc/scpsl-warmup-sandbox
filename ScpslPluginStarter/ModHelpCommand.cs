@@ -19,21 +19,22 @@ public sealed class ModHelpCommand : ICommand
 
     public bool Execute(ArraySegment<string> arguments, ICommandSender sender, out string response)
     {
+        WarmupSandboxPlugin? plugin = WarmupSandboxPlugin.Instance;
+        bool playerPanelEnabled = plugin?.Config.PlayerPanelEnabled ?? false;
+
         response = WarmupLocalization.T(
             "Warmup commands:\n" +
-            ".loadout - human presets\n" +
-            ".loadout <number|name> - choose human preset\n" +
-            ".loadout <173|939|106|049|3114|096> - temporary SCP practice role\n" +
-            ".bots setcount <count> - change bot count with cooldown\n" +
-            "Open Server Specific Settings for the console (personal actions: first 3 free, then 5s cooldown; global Apply buttons: shared cooldown)\n" +
-            "Admin-only extras: bots start/restart/stop/save/map/difficulty/aimode/language/set <key> <value>",
+            "Player text commands are disabled.\n" +
+            (playerPanelEnabled
+                ? "Use the GUI in Server Specific Settings for player controls.\n"
+                : "Player GUI controls are disabled on this server.\n") +
+            "Admin commands: bots status/start/restart/stop/save/map/difficulty/aimode/language/set <key> <value>",
             "热身命令：\n" +
-            ".loadout - 查看人类预设\n" +
-            ".loadout <编号|名称> - 选择人类预设\n" +
-            ".loadout <173|939|106|049|3114|096> - 临时切换为 SCP 练习角色\n" +
-            ".bots setcount <数量> - 带冷却修改机器人数量\n" +
-            "打开服务器专属设置（Server Specific Settings）使用控制台（个人按钮前 3 次无冷却，之后 5 秒；全局应用按钮共享冷却）\n" +
-            "管理员额外命令：bots start/restart/stop/save/map/difficulty/aimode/language/set <键> <值>");
+            "玩家文本命令已关闭。\n" +
+            (playerPanelEnabled
+                ? "请使用服务器专属设置中的图形界面进行玩家控制。\n"
+                : "本服务器已关闭玩家图形界面控制。\n") +
+            "管理员命令：bots status/start/restart/stop/save/map/difficulty/aimode/language/set <键> <值>");
         return true;
     }
 }

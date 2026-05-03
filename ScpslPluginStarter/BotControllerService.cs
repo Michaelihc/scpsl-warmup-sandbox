@@ -14,6 +14,10 @@ internal sealed class BotControllerService
     private const int CampDurationMs = 30000;
     private const int CampCooldownMs = 30000;
     private const int MinimumForwardJumpIntervalMs = 1000;
+    private const int RelevantDoorCacheMs = 1500;
+    private const int SustainedStuckRoomTeleportMs = 10000;
+    private const int SustainedStuckRoomTeleportCooldownMs = 10000;
+    private const float ElevatedPropForwardTeleportDistance = 1.35f;
     private const float ChaseStrafeBias = 0.6f;
     private const float ReactiveChaseStrafeBias = 1.05f;
     private const float ScpForwardStrafeBias = 0.35f;
@@ -105,9 +109,10 @@ internal sealed class BotControllerService
             updateFacilityFollower(bot, state, null, false);
             updateZoomHold(bot, state, null);
             UpdateForwardProgressState(bot, state, behavior, nowTick);
+            TriggerMovementStallJumpIfReady(bot, state, behavior, tryInvokeDummyActions, logNavDebug, nowTick);
             if (!closeRetreatLockActive)
             {
-                MaybeForceNavigationRepathOnStuck(bot, state, behavior, allowFacilityDoorTeleport: !useDust2Arena, logNavDebug, nowTick);
+                MaybeForceNavigationRepathOnStuck(bot, state, behavior, allowFacilityDoorTeleport: !useDust2Arena, tryInvokeDummyActions, logNavDebug, nowTick);
             }
             RefreshStrafe(state, random, nowTick);
             if (!TryPatrolWithoutTarget(
@@ -142,9 +147,10 @@ internal sealed class BotControllerService
         }
 
         UpdateForwardProgressState(bot, state, behavior, nowTick);
+        TriggerMovementStallJumpIfReady(bot, state, behavior, tryInvokeDummyActions, logNavDebug, nowTick);
         if (!closeRetreatLockActive)
         {
-            MaybeForceNavigationRepathOnStuck(bot, state, behavior, allowFacilityDoorTeleport: !useDust2Arena, logNavDebug, nowTick);
+            MaybeForceNavigationRepathOnStuck(bot, state, behavior, allowFacilityDoorTeleport: !useDust2Arena, tryInvokeDummyActions, logNavDebug, nowTick);
         }
         RefreshStrafe(state, random, nowTick);
         EvaluateState(bot, state, target, behavior, random, nowTick);
@@ -160,6 +166,11 @@ internal sealed class BotControllerService
         UpdateVisibleCombatTargetWindow(state, target, nowTick);
         state.HasPatrolTarget = false;
         updateZoomHold(bot, state, target);
+        if (TryTeleportToRandomRoomForFarTarget(bot, state, target, behavior, random, useDust2Arena, logNavDebug, nowTick))
+        {
+            return;
+        }
+
         bool canMove = state.AiState != BotAiState.Camp;
 
         Vector3 moveGoal = ResolveMoveGoal(bot, state, target);
@@ -523,9 +534,11 @@ internal sealed class BotControllerService
         Door? door = FindRelevantNearbyDoor(bot.Position, moveGoal, openRadius);
         if (door == null || door.IsOpened || door.IsDestroyed)
         {
+            ClearStaleRelevantDoor(state, nowTick);
             return false;
         }
 
+        RememberRelevantDoor(state, door, nowTick);
         if (door.IsLocked && !behavior.BotForceOpenUnlockedDoors)
         {
             if (ShouldPauseAtClosedDoor(bot.Position, door, behavior))
@@ -547,6 +560,24 @@ internal sealed class BotControllerService
         door.IsOpened = true;
         logNavDebug(bot, state, $"door-open door={GetDoorLabel(door)} zone={door.Zone} pos={FormatVector(door.Position)}");
         return false;
+    }
+
+    private static void RememberRelevantDoor(ManagedBotState state, Door door, int nowTick)
+    {
+        state.LastRelevantDoorPosition = door.Position;
+        state.LastRelevantDoorLabel = GetDoorLabel(door);
+        state.LastRelevantDoorTick = nowTick;
+    }
+
+    private static void ClearStaleRelevantDoor(ManagedBotState state, int nowTick)
+    {
+        if (state.LastRelevantDoorTick != 0
+            && unchecked(nowTick - state.LastRelevantDoorTick) > RelevantDoorCacheMs)
+        {
+            state.LastRelevantDoorPosition = default;
+            state.LastRelevantDoorLabel = "";
+            state.LastRelevantDoorTick = 0;
+        }
     }
 
     private static Door? FindRelevantNearbyDoor(Vector3 botPosition, Vector3 moveGoal, float radius)
@@ -608,6 +639,11 @@ internal sealed class BotControllerService
 
     private static float DistancePointToSegment2D(Vector3 point, Vector3 start, Vector3 end)
     {
+        return DistancePointToSegment2D(point, start, end, out _);
+    }
+
+    private static float DistancePointToSegment2D(Vector3 point, Vector3 start, Vector3 end, out float t)
+    {
         point.y = 0f;
         start.y = 0f;
         end.y = 0f;
@@ -615,10 +651,11 @@ internal sealed class BotControllerService
         float lengthSquared = segment.sqrMagnitude;
         if (lengthSquared < 0.001f)
         {
+            t = 0f;
             return Vector3.Distance(point, start);
         }
 
-        float t = Mathf.Clamp01(Vector3.Dot(point - start, segment) / lengthSquared);
+        t = Mathf.Clamp01(Vector3.Dot(point - start, segment) / lengthSquared);
         return Vector3.Distance(point, start + (segment * t));
     }
 
@@ -1680,6 +1717,7 @@ internal sealed class BotControllerService
         ManagedBotState state,
         BotBehaviorDefinition behavior,
         bool allowFacilityDoorTeleport,
+        Func<Player, IEnumerable<string>, bool> tryInvokeDummyActions,
         Action<Player, ManagedBotState, string> logNavDebug,
         int nowTick)
     {
@@ -1691,6 +1729,8 @@ internal sealed class BotControllerService
 
         state.LastNavigationStuckRepathTick = nowTick;
         state.NavigationStuckRecoveryCount++;
+        TriggerStuckJumpIfReady(bot, state, behavior, tryInvokeDummyActions, logNavDebug, nowTick);
+
         bool repeatedNudgeLoop = IsRecentNavMeshStuckNudgeLoop(state, nowTick);
         if (repeatedNudgeLoop)
         {
@@ -1702,6 +1742,16 @@ internal sealed class BotControllerService
         state.ForwardBlockedUntilTick = 0;
         state.LeftBlockedUntilTick = 0;
         state.RightBlockedUntilTick = 0;
+        if (TryTeleportToRandomRoomInSameZoneAfterSustainedStuck(bot, state, behavior, logNavDebug, nowTick))
+        {
+            state.StuckTicks = 0;
+            state.ForwardStallSinceTick = 0;
+            state.NavigationStuckRecoveryCount = 0;
+            ResetNavMeshStuckNudgeLoop(state);
+            state.LastPosition = bot.Position;
+            return;
+        }
+
         if (allowFacilityDoorTeleport && TryTeleportToRandomDoorInSameZone(bot, state, behavior, logNavDebug, nowTick))
         {
             logNavDebug(
@@ -1723,6 +1773,16 @@ internal sealed class BotControllerService
                 state,
                 $"stuck-no-nav ticks={state.StuckTicks} move={state.LastMoveIntentLabel} stallMs={GetForwardStallMs(state, nowTick)} pos=({bot.Position.x:F1},{bot.Position.y:F1},{bot.Position.z:F1})");
             state.StuckTicks = 0;
+            return;
+        }
+
+        if (TryRecoverFromElevatedPropStuck(bot, state, behavior, logNavDebug, nowTick))
+        {
+            state.StuckTicks = 0;
+            state.ForwardStallSinceTick = 0;
+            state.NavigationStuckRecoveryCount = 0;
+            ResetNavMeshStuckNudgeLoop(state);
+            state.LastPosition = bot.Position;
             return;
         }
 
@@ -1921,6 +1981,161 @@ internal sealed class BotControllerService
         return true;
     }
 
+    private bool TryTeleportToRandomRoomForFarTarget(
+        Player bot,
+        ManagedBotState state,
+        BotTargetSelection? target,
+        BotBehaviorDefinition behavior,
+        System.Random random,
+        bool useDust2Arena,
+        Action<Player, ManagedBotState, string> logNavDebug,
+        int nowTick)
+    {
+        if (useDust2Arena
+            || target == null
+            || !behavior.LongRangeRandomRoomTeleportEnabled
+            || target.Distance <= Mathf.Max(1.0f, behavior.LongRangeRandomRoomTeleportDistance)
+            || unchecked(nowTick - state.LastLongRangeRoomTeleportTick) < Math.Max(1000, behavior.LongRangeRandomRoomTeleportCooldownMs)
+            || RoomIdentifier.AllRoomIdentifiers == null)
+        {
+            return false;
+        }
+
+        bool botZoneKnown = TryGetClosestRoomZone(bot.Position, out FacilityZone botZone);
+        bool targetZoneKnown = TryGetClosestRoomZone(target.Target.Position, out FacilityZone targetZone);
+        if (!botZoneKnown
+            || botZone == FacilityZone.None
+            || botZone == FacilityZone.Surface
+            || (targetZoneKnown && targetZone == FacilityZone.Surface))
+        {
+            return false;
+        }
+
+        List<(RoomIdentifier Room, Vector3 NavPosition)> candidates = CollectSafeRoomTeleportCandidates(behavior, botZone);
+        if (candidates.Count == 0)
+        {
+            logNavDebug(
+                bot,
+                state,
+                $"long-range-room-teleport-no-candidate target={target.Target.Nickname} dist={target.Distance:F1} botZone={botZone} targetZone={targetZone}");
+            return false;
+        }
+
+        (RoomIdentifier selectedRoom, Vector3 selectedNavPosition) = candidates[random.Next(candidates.Count)];
+        bot.Position = ApplyDirectNavPlayerOffset(selectedNavPosition, behavior);
+        state.LastLongRangeRoomTeleportTick = nowTick;
+        state.HasDirectNavigationSafePosition = true;
+        state.LastDirectNavigationSafePosition = selectedNavPosition;
+        state.LastDirectNavigationMoveTick = nowTick;
+        state.LastMoveIntentLabel = "long-range-room-teleport";
+        state.LastMoveIntentTick = nowTick;
+        state.StuckTicks = 0;
+        state.ForwardStallSinceTick = 0;
+        state.NavigationStuckRecoveryCount = 0;
+        state.LastPosition = bot.Position;
+        TryResetPathAfterTeleport(state, selectedNavPosition);
+        logNavDebug(
+            bot,
+            state,
+            $"long-range-room-teleport target={target.Target.Nickname} dist={target.Distance:F1} botZone={botZone} targetZone={targetZone} room={selectedRoom.Name} zone={selectedRoom.Zone} nav=({selectedNavPosition.x:F1},{selectedNavPosition.y:F1},{selectedNavPosition.z:F1}) candidates={candidates.Count}");
+        return true;
+    }
+
+    private static List<(RoomIdentifier Room, Vector3 NavPosition)> CollectSafeRoomTeleportCandidates(
+        BotBehaviorDefinition behavior,
+        FacilityZone zone)
+    {
+        List<(RoomIdentifier Room, Vector3 NavPosition)> candidates = new();
+        if (RoomIdentifier.AllRoomIdentifiers == null)
+        {
+            return candidates;
+        }
+
+        float sampleDistance = Mathf.Max(1.0f, behavior.LongRangeRandomRoomTeleportSampleDistance);
+        foreach (RoomIdentifier room in RoomIdentifier.AllRoomIdentifiers)
+        {
+            if (room == null
+                || room.transform == null
+                || room.Zone == FacilityZone.None
+                || room.Zone == FacilityZone.Surface
+                || (zone != FacilityZone.None && room.Zone != zone))
+            {
+                continue;
+            }
+
+            Vector3 center = room.transform.position;
+            if (!NavMesh.SamplePosition(center, out NavMeshHit hit, sampleDistance, NavMesh.AllAreas)
+                || Mathf.Abs(hit.position.y - center.y) > Math.Max(4.0f, behavior.FacilityRuntimeNavMeshAgentHeight * 2.5f)
+                || !IsSafeTeleportFloor(hit.position, behavior)
+                || IsTeleportBodyBlocked(hit.position, behavior))
+            {
+                continue;
+            }
+
+            candidates.Add((room, hit.position));
+        }
+
+        return candidates;
+    }
+
+    private bool TryTeleportToRandomRoomInSameZoneAfterSustainedStuck(
+        Player bot,
+        ManagedBotState state,
+        BotBehaviorDefinition behavior,
+        Action<Player, ManagedBotState, string> logNavDebug,
+        int nowTick)
+    {
+        int stallMs = GetForwardStallMs(state, nowTick);
+        if (stallMs < SustainedStuckRoomTeleportMs
+            || unchecked(nowTick - state.LastRoomCenterTeleportTick) < SustainedStuckRoomTeleportCooldownMs
+            || RoomIdentifier.AllRoomIdentifiers == null)
+        {
+            return false;
+        }
+
+        Vector3 zoneAnchor = bot.Position;
+        if (!TryGetClosestRoomZone(zoneAnchor, out FacilityZone zone)
+            && state.HasDirectNavigationSafePosition)
+        {
+            zoneAnchor = state.LastDirectNavigationSafePosition;
+            TryGetClosestRoomZone(zoneAnchor, out zone);
+        }
+
+        if (zone == FacilityZone.None || zone == FacilityZone.Surface)
+        {
+            logNavDebug(
+                bot,
+                state,
+                $"sustained-stuck-room-teleport-no-zone stallMs={stallMs} zone={zone} pos=({bot.Position.x:F1},{bot.Position.y:F1},{bot.Position.z:F1})");
+            return false;
+        }
+
+        List<(RoomIdentifier Room, Vector3 NavPosition)> candidates = CollectSafeRoomTeleportCandidates(behavior, zone);
+        if (candidates.Count == 0)
+        {
+            logNavDebug(
+                bot,
+                state,
+                $"sustained-stuck-room-teleport-no-candidate stallMs={stallMs} zone={zone} anchor=({zoneAnchor.x:F1},{zoneAnchor.y:F1},{zoneAnchor.z:F1})");
+            return false;
+        }
+
+        (RoomIdentifier selectedRoom, Vector3 selectedNavPosition) = candidates[UnityEngine.Random.Range(0, candidates.Count)];
+        bot.Position = ApplyDirectNavPlayerOffset(selectedNavPosition, behavior);
+        state.LastRoomCenterTeleportTick = nowTick;
+        state.HasDirectNavigationSafePosition = true;
+        state.LastDirectNavigationSafePosition = selectedNavPosition;
+        state.LastDirectNavigationMoveTick = nowTick;
+        state.LastMoveIntentLabel = "sustained-stuck-room-teleport";
+        state.LastMoveIntentTick = nowTick;
+        TryResetPathAfterTeleport(state, selectedNavPosition);
+        logNavDebug(
+            bot,
+            state,
+            $"sustained-stuck-room-teleport stallMs={stallMs} zone={zone} room={selectedRoom.Name} nav=({selectedNavPosition.x:F1},{selectedNavPosition.y:F1},{selectedNavPosition.z:F1}) candidates={candidates.Count}");
+        return true;
+    }
+
     private static bool TryGetClosestRoomZone(Vector3 position, out FacilityZone zone)
     {
         zone = FacilityZone.None;
@@ -2027,6 +2242,154 @@ internal sealed class BotControllerService
         return found;
     }
 
+    private bool TryRecoverFromElevatedPropStuck(
+        Player bot,
+        ManagedBotState state,
+        BotBehaviorDefinition behavior,
+        Action<Player, ManagedBotState, string> logNavDebug,
+        int nowTick)
+    {
+        if (state.NavigationWaypoints.Count == 0
+            || state.NavigationWaypointIndex < 0
+            || state.NavigationWaypointIndex >= state.NavigationWaypoints.Count)
+        {
+            return false;
+        }
+
+        Vector3 botPosition = bot.Position;
+        if (!IsElevatedRelativeToNavMesh(botPosition, state, behavior, out NavMeshHit currentNavHit)
+            && state.NavigationStuckRecoveryCount < 3)
+        {
+            return false;
+        }
+
+        Vector3 waypoint = state.NavigationWaypoints[state.NavigationWaypointIndex];
+        Vector3 forwardDirection = ResolveElevatedPropRecoveryDirection(bot, botPosition, waypoint);
+        Vector3 candidate = botPosition + (forwardDirection * ElevatedPropForwardTeleportDistance);
+        if (TryClampPropForwardTeleportBeforeCachedDoor(state, botPosition, candidate, nowTick, out Vector3 clampedCandidate, out string doorLabel)
+            && HorizontalDistance(botPosition, clampedCandidate) < 0.25f)
+        {
+            logNavDebug(
+                bot,
+                state,
+                $"prop-forward-door-blocked door={doorLabel} from=({botPosition.x:F1},{botPosition.y:F1},{botPosition.z:F1}) candidate=({candidate.x:F1},{candidate.y:F1},{candidate.z:F1}) wp=({waypoint.x:F1},{waypoint.y:F1},{waypoint.z:F1})");
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(doorLabel))
+        {
+            candidate = clampedCandidate;
+        }
+
+        bot.Position = candidate;
+        state.LastDirectNavigationMoveTick = nowTick;
+        state.LastMoveIntentLabel = "prop-forward-teleport";
+        state.LastMoveIntentTick = nowTick;
+
+        if (IsOutOfNavigationBounds(candidate, behavior, out NavMeshHit candidateNavHit))
+        {
+            if (TryTeleportToFallbackRoom(
+                    bot,
+                    state,
+                    behavior,
+                    logNavDebug,
+                    nowTick,
+                    "prop-forward-oob",
+                    state.HasDirectNavigationSafePosition ? state.LastDirectNavigationSafePosition : currentNavHit.position))
+            {
+                state.StuckTicks = 0;
+                state.ForwardStallSinceTick = 0;
+                return true;
+            }
+
+            bot.Position = botPosition;
+            logNavDebug(
+                bot,
+                state,
+                $"prop-forward-oob-no-room from=({botPosition.x:F1},{botPosition.y:F1},{botPosition.z:F1}) candidate=({candidate.x:F1},{candidate.y:F1},{candidate.z:F1}) wp=({waypoint.x:F1},{waypoint.y:F1},{waypoint.z:F1})");
+            return false;
+        }
+
+        state.HasDirectNavigationSafePosition = true;
+        state.LastDirectNavigationSafePosition = candidateNavHit.position;
+        TryResetPathAfterTeleport(state, candidateNavHit.position);
+        logNavDebug(
+            bot,
+            state,
+            $"prop-forward-teleport from=({botPosition.x:F1},{botPosition.y:F1},{botPosition.z:F1}) to=({candidate.x:F1},{candidate.y:F1},{candidate.z:F1}) nav=({candidateNavHit.position.x:F1},{candidateNavHit.position.y:F1},{candidateNavHit.position.z:F1}) wp=({waypoint.x:F1},{waypoint.y:F1},{waypoint.z:F1})");
+        return true;
+    }
+
+    private static bool TryClampPropForwardTeleportBeforeCachedDoor(
+        ManagedBotState state,
+        Vector3 start,
+        Vector3 candidate,
+        int nowTick,
+        out Vector3 clampedCandidate,
+        out string doorLabel)
+    {
+        clampedCandidate = candidate;
+        doorLabel = "";
+        Vector3 segment = candidate - start;
+        segment.y = 0f;
+        float segmentLength = segment.magnitude;
+        if (segmentLength < 0.001f)
+        {
+            return false;
+        }
+
+        if (state.LastRelevantDoorTick == 0
+            || unchecked(nowTick - state.LastRelevantDoorTick) > RelevantDoorCacheMs
+            || Mathf.Abs(state.LastRelevantDoorPosition.y - start.y) > 5.0f)
+        {
+            return false;
+        }
+
+        float segmentDistance = DistancePointToSegment2D(state.LastRelevantDoorPosition, start, candidate, out float t);
+        if (t < 0f || t > 1f || segmentDistance > 1.1f)
+        {
+            return false;
+        }
+
+        Vector3 direction = segment / segmentLength;
+        float bestAlong = t * segmentLength;
+        float safeDistance = Mathf.Max(0f, bestAlong - 0.4f);
+        clampedCandidate = start + (direction * safeDistance);
+        clampedCandidate.y = candidate.y;
+        doorLabel = state.LastRelevantDoorLabel;
+        return true;
+    }
+
+    private static bool IsElevatedRelativeToNavMesh(
+        Vector3 botPosition,
+        ManagedBotState state,
+        BotBehaviorDefinition behavior,
+        out NavMeshHit navHit)
+    {
+        float sampleDistance = Mathf.Max(1.0f, behavior.FacilityNavMeshSampleDistance);
+        if (!NavMesh.SamplePosition(botPosition, out navHit, sampleDistance, NavMesh.AllAreas))
+        {
+            return false;
+        }
+
+        return botPosition.y > navHit.position.y + 0.55f
+            || IsElevatedPropStuckCandidate(botPosition, state);
+    }
+
+    private static Vector3 ResolveElevatedPropRecoveryDirection(Player bot, Vector3 botPosition, Vector3 waypoint)
+    {
+        Vector3 direction = waypoint - botPosition;
+        direction.y = 0f;
+        if (direction.sqrMagnitude < 0.0001f)
+        {
+            float movementYaw = NormalizeSignedAngle(bot.LookRotation.y);
+            direction = Quaternion.Euler(0f, movementYaw, 0f) * Vector3.forward;
+            direction.y = 0f;
+        }
+
+        return direction.sqrMagnitude < 0.0001f ? Vector3.forward : direction.normalized;
+    }
+
     private static bool TryFindPhysicsFloorPosition(Vector3 probe, BotBehaviorDefinition behavior, out Vector3 floorPosition)
     {
         floorPosition = default;
@@ -2042,6 +2405,75 @@ internal sealed class BotControllerService
         }
 
         floorPosition = hit.point;
+        return true;
+    }
+
+    private static bool IsOutOfNavigationBounds(
+        Vector3 position,
+        BotBehaviorDefinition behavior,
+        out NavMeshHit navHit)
+    {
+        float sampleDistance = Mathf.Max(8.0f, behavior.FacilityNavMeshSampleDistance * 2.0f);
+        if (!NavMesh.SamplePosition(position, out navHit, sampleDistance, NavMesh.AllAreas))
+        {
+            return true;
+        }
+
+        float verticalDelta = Mathf.Abs(position.y - navHit.position.y);
+        if (verticalDelta > Math.Max(8.0f, behavior.FacilityRuntimeNavMeshAgentHeight * 5.0f))
+        {
+            return true;
+        }
+
+        Vector3 floorProbe = position + (Vector3.up * 1.5f);
+        return !Physics.Raycast(floorProbe, Vector3.down, 10.0f, ~0, QueryTriggerInteraction.Ignore);
+    }
+
+    private bool TryTeleportToFallbackRoom(
+        Player bot,
+        ManagedBotState state,
+        BotBehaviorDefinition behavior,
+        Action<Player, ManagedBotState, string> logNavDebug,
+        int nowTick,
+        string reason,
+        Vector3 anchor)
+    {
+        if (RoomIdentifier.AllRoomIdentifiers == null)
+        {
+            return false;
+        }
+
+        bool hasZone = TryGetClosestRoomZone(anchor, out FacilityZone zone)
+            && zone != FacilityZone.None
+            && zone != FacilityZone.Surface;
+        List<(RoomIdentifier Room, Vector3 NavPosition)> candidates = CollectSafeRoomTeleportCandidates(
+            behavior,
+            hasZone ? zone : FacilityZone.None);
+        if (candidates.Count == 0 && hasZone)
+        {
+            candidates = CollectSafeRoomTeleportCandidates(behavior, FacilityZone.None);
+        }
+
+        if (candidates.Count == 0)
+        {
+            return false;
+        }
+
+        (RoomIdentifier selectedRoom, Vector3 selectedNavPosition) = candidates[UnityEngine.Random.Range(0, candidates.Count)];
+        bot.Position = ApplyDirectNavPlayerOffset(selectedNavPosition, behavior);
+        state.LastRoomCenterTeleportTick = nowTick;
+        state.HasDirectNavigationSafePosition = true;
+        state.LastDirectNavigationSafePosition = selectedNavPosition;
+        state.LastDirectNavigationMoveTick = nowTick;
+        state.LastMoveIntentLabel = "fallback-room-teleport";
+        state.LastMoveIntentTick = nowTick;
+        state.NavigationStuckRecoveryCount = 0;
+        state.LastPosition = bot.Position;
+        TryResetPathAfterTeleport(state, selectedNavPosition);
+        logNavDebug(
+            bot,
+            state,
+            $"fallback-room-teleport reason={reason} room={selectedRoom.Name} zone={selectedRoom.Zone} anchor=({anchor.x:F1},{anchor.y:F1},{anchor.z:F1}) nav=({selectedNavPosition.x:F1},{selectedNavPosition.y:F1},{selectedNavPosition.z:F1}) candidates={candidates.Count}");
         return true;
     }
 
@@ -2352,6 +2784,77 @@ internal sealed class BotControllerService
         }
 
         TryApplyForwardRecoverySidestep(bot, state, behavior, tryInvokeDummyActions, nowTick);
+    }
+
+    private static void TriggerMovementStallJumpIfReady(
+        Player bot,
+        ManagedBotState state,
+        BotBehaviorDefinition behavior,
+        Func<Player, IEnumerable<string>, bool> tryInvokeDummyActions,
+        Action<Player, ManagedBotState, string> logNavDebug,
+        int nowTick)
+    {
+        int thresholdMs = Math.Max(0, behavior.ForwardStuckJumpThresholdMs);
+        if (state.ForwardStallSinceTick == 0
+            || unchecked(nowTick - state.ForwardStallSinceTick) < thresholdMs)
+        {
+            return;
+        }
+
+        TriggerStuckJumpIfReady(bot, state, behavior, tryInvokeDummyActions, logNavDebug, nowTick);
+    }
+
+    private static void TriggerStuckJumpIfReady(
+        Player bot,
+        ManagedBotState state,
+        BotBehaviorDefinition behavior,
+        Func<Player, IEnumerable<string>, bool> tryInvokeDummyActions,
+        Action<Player, ManagedBotState, string> logNavDebug,
+        int nowTick,
+        int? intervalOverrideMs = null,
+        int burstMultiplier = 1,
+        string logReason = "stuck-jump")
+    {
+        if (behavior.JumpActionNames is not { Length: > 0 }
+            || unchecked(nowTick - state.NextForwardJumpTick) < 0)
+        {
+            return;
+        }
+
+        int intervalMs = intervalOverrideMs.HasValue
+            ? Math.Max(MinimumForwardJumpIntervalMs, intervalOverrideMs.Value)
+            : Math.Max(MinimumForwardJumpIntervalMs, behavior.ForwardStuckJumpIntervalMs);
+        state.NextForwardJumpTick = nowTick + intervalMs;
+        int jumpBursts = Math.Max(1, behavior.ForwardStuckJumpBurstCount) * Math.Max(1, burstMultiplier);
+        for (int i = 0; i < jumpBursts; i++)
+        {
+            tryInvokeDummyActions(bot, behavior.JumpActionNames);
+        }
+
+        logNavDebug(
+            bot,
+            state,
+            $"{logReason} ticks={state.StuckTicks} move={state.LastMoveIntentLabel} pos=({bot.Position.x:F1},{bot.Position.y:F1},{bot.Position.z:F1}) bursts={jumpBursts} nextMs={intervalMs}");
+    }
+
+    private static bool IsElevatedPropStuckCandidate(Vector3 botPosition, ManagedBotState state)
+    {
+        if (state.NavigationWaypoints.Count == 0
+            || state.NavigationWaypointIndex < 0
+            || state.NavigationWaypointIndex >= state.NavigationWaypoints.Count)
+        {
+            return false;
+        }
+
+        for (int i = state.NavigationWaypointIndex; i < state.NavigationWaypoints.Count; i++)
+        {
+            if (state.NavigationWaypoints[i].y < botPosition.y - 0.6f)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static bool TryApplyForwardRecoverySidestep(
@@ -2839,6 +3342,10 @@ internal sealed class BotControllerService
             NavMeshLocalDetourForwardDistance = behavior.NavMeshLocalDetourForwardDistance,
             NavMeshLocalDetourLateralDistance = behavior.NavMeshLocalDetourLateralDistance,
             NavMeshLocalDetourMaxWaypointDistance = behavior.NavMeshLocalDetourMaxWaypointDistance,
+            LongRangeRandomRoomTeleportEnabled = behavior.LongRangeRandomRoomTeleportEnabled,
+            LongRangeRandomRoomTeleportDistance = behavior.LongRangeRandomRoomTeleportDistance,
+            LongRangeRandomRoomTeleportCooldownMs = behavior.LongRangeRandomRoomTeleportCooldownMs,
+            LongRangeRandomRoomTeleportSampleDistance = behavior.LongRangeRandomRoomTeleportSampleDistance,
             GlobalVisionMaxVerticalDelta = behavior.GlobalVisionMaxVerticalDelta,
             NavDebugLogging = behavior.NavDebugLogging,
             NavigationExecutionLogIntervalMs = behavior.NavigationExecutionLogIntervalMs,

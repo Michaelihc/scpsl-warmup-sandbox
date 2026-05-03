@@ -146,6 +146,14 @@ internal sealed class ManagedBotState
 
     public int LastDoorTeleportTick { get; set; }
 
+    public UnityEngine.Vector3 LastRelevantDoorPosition { get; set; }
+
+    public string LastRelevantDoorLabel { get; set; } = "";
+
+    public int LastRelevantDoorTick { get; set; }
+
+    public int LastLongRangeRoomTeleportTick { get; set; }
+
     public int LastDirectNavigationMoveTick { get; set; }
 
     public bool HasDirectNavigationSafePosition { get; set; }
@@ -182,6 +190,10 @@ internal sealed class ManagedBotState
         LastSkippedStuckWaypoint = default;
         LastSkippedStuckWaypointTick = 0;
         LastDoorTeleportTick = 0;
+        LastRelevantDoorPosition = default;
+        LastRelevantDoorLabel = "";
+        LastRelevantDoorTick = 0;
+        LastLongRangeRoomTeleportTick = 0;
         LastDirectNavigationMoveTick = 0;
         HasDirectNavigationSafePosition = false;
         LastDirectNavigationSafePosition = default;
