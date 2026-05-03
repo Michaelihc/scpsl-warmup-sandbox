@@ -225,7 +225,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     public override string Name => "WarmupSandbox";
     public override string Description => "Warmup sandbox with moving dummy bots.";
     public override string Author => "Michael";
-    public override Version Version => new(0, 1, 0);
+    public override Version Version => new(0, 1, 1);
     public override Version RequiredApiVersion => new(1, 1, 6);
 
     public override void Enable()
