@@ -16,7 +16,8 @@ enable_zoom_logging: false
 enable_spawn_protection: true
 spawn_protection_duration_ms: 3000
 auto_cleanup_enabled: true
-auto_cleanup_interval_seconds: 180
+auto_cleanup_interval_seconds: 10
+auto_cleanup_pickup_threshold: 80
 player_bot_count_global_cooldown_seconds: 60
 player_bot_count_cooldown_seconds: 180
 player_bot_count_cooldown_jitter_seconds: 60
@@ -172,7 +173,7 @@ dust2_map:
   runtime_nav_mesh_sample_distance: 3.0
   runtime_nav_mesh_bounds_padding: 6.0
   runtime_nav_mesh_min_region_area: 0.5
-  visualize_runtime_nav_mesh: true
+  visualize_runtime_nav_mesh: false
   runtime_nav_mesh_max_debug_edges: 6000
   runtime_nav_mesh_debug_edge_width: 0.035
   runtime_nav_mesh_debug_height_offset: 0.06
@@ -201,10 +202,10 @@ bot_behavior:
   enable_combat_actions: true
   enable_step_movement: true
   enable_obstacle_navigation: true
-  use_facility_nav_mesh: false
+  use_facility_nav_mesh: true
   use_facility_surface_nav_mesh: true
-  facility_nav_mesh_sample_distance: 50.0
-  facility_runtime_nav_mesh_enabled: false
+  facility_nav_mesh_sample_distance: 3.0
+  facility_runtime_nav_mesh_enabled: true
   facility_surface_runtime_nav_mesh_enabled: true
   facility_runtime_nav_mesh_agent_radius: 0.25
   facility_runtime_nav_mesh_agent_height: 1.8
@@ -215,7 +216,7 @@ bot_behavior:
   facility_runtime_nav_mesh_bounds_padding: 8.0
   facility_runtime_nav_mesh_min_region_area: 0.5
   facility_runtime_nav_mesh_ignore_doors: true
-  facility_runtime_nav_mesh_log_build: false
+  facility_runtime_nav_mesh_log_build: true
   facility_runtime_nav_mesh_create_off_mesh_links: false
   facility_runtime_nav_mesh_max_off_mesh_links: 600
   facility_runtime_nav_mesh_off_mesh_link_search_radius: 3.0
@@ -298,7 +299,7 @@ bot_behavior:
   bot_forward_move_burst_count: 2
   door_slow_forward_move_burst_count: 1
   bot_door_slow_radius: 4.5
-  stuck_tick_threshold: 2
+  stuck_tick_threshold: 3
   nav_waypoint_reach_distance: 0.9
   nav_recompute_interval_ms: 350
   nav_path_failed_cooldown_ms: 350
@@ -307,24 +308,28 @@ bot_behavior:
   nav_target_move_recompute_distance: 1.75
   nav_mesh_corner_move_max_step: 0.75
   nav_mesh_forward_move_max_angle_degrees: 50.0
-  nav_mesh_stuck_nudge_enabled: true
+  nav_mesh_stuck_nudge_enabled: false
   nav_mesh_stuck_nudge_step: 0.65
   nav_mesh_stuck_nudge_max_distance: 8.0
   nav_mesh_forward_clip_enabled: false
   nav_mesh_forward_clip_step: 0.2
   nav_mesh_room_center_teleport_enabled: false
-  nav_mesh_room_center_teleport_recovery_count: 8
-  nav_mesh_room_center_teleport_cooldown_ms: 4000
+  nav_mesh_room_center_teleport_recovery_count: 4
+  nav_mesh_room_center_teleport_cooldown_ms: 2500
   nav_mesh_room_center_teleport_sample_distance: 6.0
-  nav_mesh_stuck_door_teleport_enabled: true
+  nav_mesh_stuck_door_teleport_enabled: false
   nav_mesh_stuck_door_teleport_stuck_ms: 15000
   nav_mesh_stuck_door_teleport_cooldown_ms: 7000
   nav_mesh_stuck_door_teleport_sample_distance: 4.0
-  nav_mesh_local_detour_enabled: false
+  nav_mesh_local_detour_enabled: true
   nav_mesh_local_detour_forward_distance: 1.6
   nav_mesh_local_detour_lateral_distance: 2.0
   nav_mesh_local_detour_max_waypoint_distance: 14.0
-  nav_debug_logging: false
+  long_range_random_room_teleport_enabled: true
+  long_range_random_room_teleport_distance: 35.0
+  long_range_random_room_teleport_cooldown_ms: 7000
+  long_range_random_room_teleport_sample_distance: 6.0
+  nav_debug_logging: true
   navigation_execution_log_interval_ms: 750
   enable_a_star_fallback_navigation: true
   a_star_fallback_trigger_radius: 5.0
@@ -344,9 +349,9 @@ bot_behavior:
   range_tolerance: 2.25
   stuck_distance_threshold: 0.45
   nearby_bot_avoidance_radius: 1.35
-  forward_stuck_jump_threshold_ms: 3500
+  forward_stuck_jump_threshold_ms: 200
   forward_stuck_jump_interval_ms: 1000
-  forward_stuck_jump_burst_count: 2
+  forward_stuck_jump_burst_count: 1
   max_horizontal_aim_actions_per_tick: 3
   max_vertical_aim_actions_per_tick: 2
   horizontal_aim_deadzone_degrees: 1.5

@@ -51,6 +51,11 @@ internal sealed class FacilityNavAgentFollower : MonoBehaviour
             return;
         }
 
+        if (!_state.LastNavigationReason.StartsWith("navmesh-agent", StringComparison.Ordinal))
+        {
+            return;
+        }
+
         NavMeshAgent? agent = _state.NavigationAgent;
         if (agent == null || !agent.enabled || !agent.isOnNavMesh)
         {

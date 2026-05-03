@@ -5,8 +5,6 @@ using ICommand = CommandSystem.ICommand;
 
 namespace ScpslPluginStarter;
 
-[CommandHandler(typeof(GameConsoleCommandHandler))]
-[CommandHandler(typeof(ClientCommandHandler))]
 public sealed class PlayerPanelCommand : ICommand
 {
     public string Command => "panel";
@@ -14,8 +12,8 @@ public sealed class PlayerPanelCommand : ICommand
     public string[] Aliases => new[] { "adminpanel", "menu" };
 
     public string Description => WarmupLocalization.T(
-        "Opens and uses the warmup player command panel.",
-        "打开并使用热身玩家控制台。");
+        "Opens the warmup player command panel.",
+        "打开热身玩家控制台。");
 
     public bool Execute(ArraySegment<string> arguments, ICommandSender sender, out string response)
     {
@@ -32,11 +30,6 @@ public sealed class PlayerPanelCommand : ICommand
             return false;
         }
 
-        if (arguments.Count == 0)
-        {
-            return plugin.TryOpenPlayerPanel(player, out response);
-        }
-
-        return plugin.TryExecutePlayerPanelCommand(player, arguments, out response);
+        return plugin.TryOpenPlayerPanel(player, out response);
     }
 }

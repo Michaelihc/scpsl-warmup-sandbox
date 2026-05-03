@@ -6,8 +6,6 @@ using ICommand = CommandSystem.ICommand;
 namespace ScpslPluginStarter;
 
 [CommandHandler(typeof(RemoteAdminCommandHandler))]
-[CommandHandler(typeof(GameConsoleCommandHandler))]
-[CommandHandler(typeof(ClientCommandHandler))]
 public sealed class WarmupCommand : ICommand
 {
     public string Command => "bots";
@@ -36,11 +34,7 @@ public sealed class WarmupCommand : ICommand
         string subcommand = GetArgument(arguments, 0).ToLowerInvariant();
         bool isPlayerSender = Player.TryGet(sender, out Player player);
         bool isPrivilegedSender = IsPrivilegedSender(sender);
-        if (isPlayerSender
-            && !isPrivilegedSender
-            && subcommand != "status"
-            && subcommand != "setcount"
-            && subcommand != "set")
+        if (isPlayerSender && !isPrivilegedSender)
         {
             response = BuildPlayerHelp();
             return false;
@@ -74,11 +68,6 @@ public sealed class WarmupCommand : ICommand
                         "Usage: bots setcount <count>",
                         "用法：bots setcount <数量>");
                     return false;
-                }
-
-                if (isPlayerSender && !isPrivilegedSender)
-                {
-                    return plugin.TryPlayerSetBotCount(player, GetArgument(arguments, 1), out response);
                 }
 
                 return UpdateSettingAndSave(plugin, "bots", GetArgument(arguments, 1), out response);
@@ -193,11 +182,6 @@ public sealed class WarmupCommand : ICommand
             case "set":
                 if (arguments.Count == 2 && int.TryParse(GetArgument(arguments, 1), out _))
                 {
-                    if (isPlayerSender && !isPrivilegedSender)
-                    {
-                        return plugin.TryPlayerSetBotCount(player, GetArgument(arguments, 1), out response);
-                    }
-
                     return UpdateSettingAndSave(plugin, "bots", GetArgument(arguments, 1), out response);
                 }
 
@@ -330,8 +314,8 @@ public sealed class WarmupCommand : ICommand
     private static string BuildPlayerHelp()
     {
         return WarmupLocalization.T(
-            ".bots setcount <count> changes bot count with cooldown. Use .help for all warmup commands.",
-            ".bots setcount <数量> 可带冷却修改机器人数量。输入 .help 查看全部热身命令。");
+            "Player warmup text commands are disabled on this server.",
+            "本服务器已关闭玩家热身文本命令。");
     }
 
     private static bool IsPrivilegedSender(ICommandSender sender)

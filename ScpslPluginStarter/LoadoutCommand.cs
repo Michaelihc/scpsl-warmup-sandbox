@@ -5,8 +5,6 @@ using ICommand = CommandSystem.ICommand;
 
 namespace ScpslPluginStarter;
 
-[CommandHandler(typeof(GameConsoleCommandHandler))]
-[CommandHandler(typeof(ClientCommandHandler))]
 public sealed class LoadoutCommand : ICommand
 {
     public string Command => "loadout";

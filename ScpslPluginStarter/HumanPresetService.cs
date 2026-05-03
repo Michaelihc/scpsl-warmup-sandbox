@@ -96,9 +96,13 @@ internal sealed class HumanPresetService
             lines.Add($"{marker} {i + 1}. {preset.Name} [{preset.Role}] - {gearLabel}");
         }
 
-        lines.Add(WarmupLocalization.T(
-            "Use `.loadout <number|name>` or `.loadout <173|939|106|049|3114|096>`. Use `.help` for help.",
-            "使用 `.loadout <编号|名称>` 或 `.loadout <173|939|106|049|3114|096>`。输入 `.help` 查看帮助。"));
+        lines.Add(config.PlayerPanelEnabled
+            ? WarmupLocalization.T(
+                "Use Server Specific Settings to choose a preset.",
+                "使用服务器专属设置选择预设。")
+            : WarmupLocalization.T(
+                "Preset selection is disabled on this server.",
+                "本服务器已关闭预设选择。"));
         return string.Join("\n", lines);
     }
 }
