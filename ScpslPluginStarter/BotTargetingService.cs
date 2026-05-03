@@ -215,7 +215,36 @@ internal sealed class BotTargetingService
             return true;
         }
 
+        if (IsFoundationHumanRole(bot.Role) && IsFoundationHumanRole(candidate.Role))
+        {
+            return false;
+        }
+
+        if (IsChaosHumanRole(bot.Role) && IsChaosHumanRole(candidate.Role))
+        {
+            return false;
+        }
+
         return candidate.Team != bot.Team;
+    }
+
+    private static bool IsFoundationHumanRole(RoleTypeId role)
+    {
+        return role is RoleTypeId.NtfCaptain
+            or RoleTypeId.NtfPrivate
+            or RoleTypeId.NtfSergeant
+            or RoleTypeId.NtfSpecialist
+            or RoleTypeId.FacilityGuard
+            or RoleTypeId.Scientist;
+    }
+
+    private static bool IsChaosHumanRole(RoleTypeId role)
+    {
+        return role is RoleTypeId.ChaosConscript
+            or RoleTypeId.ChaosMarauder
+            or RoleTypeId.ChaosRepressor
+            or RoleTypeId.ChaosRifleman
+            or RoleTypeId.ClassD;
     }
 
     private static void UpdateVisibleEngagement(

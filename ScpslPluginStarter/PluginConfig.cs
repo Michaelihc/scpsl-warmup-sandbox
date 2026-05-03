@@ -45,6 +45,8 @@ public sealed class PluginConfig
 
     public int AutoCleanupIntervalSeconds { get; set; } = 180;
 
+    public int AutoCleanupPickupThreshold { get; set; } = 80;
+
     public int PlayerBotCountGlobalCooldownSeconds { get; set; } = 60;
 
     public int PlayerBotCountCooldownSeconds { get; set; } = 180;
@@ -408,7 +410,7 @@ public sealed class BotBehaviorDefinition
 
     public bool UseFacilitySurfaceNavMesh { get; set; } = true;
 
-    public float FacilityNavMeshSampleDistance { get; set; } = 50.0f;
+    public float FacilityNavMeshSampleDistance { get; set; } = 3.0f;
 
     public bool FacilityRuntimeNavMeshEnabled { get; set; } = false;
 
@@ -614,7 +616,7 @@ public sealed class BotBehaviorDefinition
 
     public float NavMeshForwardMoveMaxAngleDegrees { get; set; } = 50.0f;
 
-    public bool NavMeshStuckNudgeEnabled { get; set; } = true;
+    public bool NavMeshStuckNudgeEnabled { get; set; } = false;
 
     public float NavMeshStuckNudgeStep { get; set; } = 0.65f;
 
@@ -626,13 +628,13 @@ public sealed class BotBehaviorDefinition
 
     public bool NavMeshRoomCenterTeleportEnabled { get; set; } = false;
 
-    public int NavMeshRoomCenterTeleportRecoveryCount { get; set; } = 8;
+    public int NavMeshRoomCenterTeleportRecoveryCount { get; set; } = 4;
 
-    public int NavMeshRoomCenterTeleportCooldownMs { get; set; } = 4000;
+    public int NavMeshRoomCenterTeleportCooldownMs { get; set; } = 2500;
 
     public float NavMeshRoomCenterTeleportSampleDistance { get; set; } = 6.0f;
 
-    public bool NavMeshStuckDoorTeleportEnabled { get; set; } = true;
+    public bool NavMeshStuckDoorTeleportEnabled { get; set; } = false;
 
     public int NavMeshStuckDoorTeleportStuckMs { get; set; } = 15000;
 

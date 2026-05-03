@@ -125,12 +125,13 @@ internal sealed class FacilityNavMeshService
             behavior.FacilityRuntimeNavMeshDebugSampleRadius,
             behavior.FacilityRuntimeNavMeshDebugSampleSpacing,
             anchorFloorProbeAnchors);
+        int doorBridgeSources = AddDoorBridgeSources(sources, behavior);
 
         if (sources.Count == 0)
         {
             response = behavior.FacilityRuntimeNavMeshUseRenderMeshes
-                ? $"{label} bake found no usable render-mesh sources collected={collectedSourceCount} removedUnreadableMeshes={sourceFilter.RemovedUnreadableMeshes} floorFallbacks={sourceFilter.FloorFallbacks} roomTemplateSources={roomTemplateSources.Sources} roomTemplateRooms={roomTemplateSources.Rooms} missingRoomTemplates={roomTemplateSources.MissingRooms} anchorFloorFallbacks={anchorFloorFallbacks}."
-                : $"{label} bake found no usable physics-collider sources collected={collectedSourceCount} removedUnreadableMeshes={sourceFilter.RemovedUnreadableMeshes} floorFallbacks={sourceFilter.FloorFallbacks} roomTemplateSources={roomTemplateSources.Sources} roomTemplateRooms={roomTemplateSources.Rooms} missingRoomTemplates={roomTemplateSources.MissingRooms} anchorFloorFallbacks={anchorFloorFallbacks}.";
+                ? $"{label} bake found no usable render-mesh sources collected={collectedSourceCount} removedUnreadableMeshes={sourceFilter.RemovedUnreadableMeshes} floorFallbacks={sourceFilter.FloorFallbacks} roomTemplateSources={roomTemplateSources.Sources} roomTemplateRooms={roomTemplateSources.Rooms} missingRoomTemplates={roomTemplateSources.MissingRooms} anchorFloorFallbacks={anchorFloorFallbacks} doorBridgeSources={doorBridgeSources}."
+                : $"{label} bake found no usable physics-collider sources collected={collectedSourceCount} removedUnreadableMeshes={sourceFilter.RemovedUnreadableMeshes} floorFallbacks={sourceFilter.FloorFallbacks} roomTemplateSources={roomTemplateSources.Sources} roomTemplateRooms={roomTemplateSources.Rooms} missingRoomTemplates={roomTemplateSources.MissingRooms} anchorFloorFallbacks={anchorFloorFallbacks} doorBridgeSources={doorBridgeSources}.";
             return false;
         }
 
@@ -174,7 +175,7 @@ internal sealed class FacilityNavMeshService
         string sourceKind = behavior.FacilityRuntimeNavMeshUseRenderMeshes ? "render-mesh" : "physics-collider";
         string sourceExamples = DescribeSources(sources, 5);
         response = _hasRuntimeNavMesh
-            ? $"{label} baked with {sources.Count}/{collectedSourceCount} {sourceKind} sources removedUnreadableMeshes={sourceFilter.RemovedUnreadableMeshes} floorFallbacks={sourceFilter.FloorFallbacks} roomTemplateSources={roomTemplateSources.Sources} roomTemplateRooms={roomTemplateSources.Rooms} missingRoomTemplates={roomTemplateSources.MissingRooms} anchorFloorFallbacks={anchorFloorFallbacks} offMeshLinks={offMeshLinks} bounds center=({bounds.center.x:F1},{bounds.center.y:F1},{bounds.center.z:F1}) size=({bounds.size.x:F1},{bounds.size.y:F1},{bounds.size.z:F1}) settings=(radius={settings.agentRadius:F2},height={settings.agentHeight:F2},slope={settings.agentSlope:F1},climb={settings.agentClimb:F2},minRegion={settings.minRegionArea:F1}) examples=[{sourceExamples}]. {BuildTriangulationStatus()}"
+            ? $"{label} baked with {sources.Count}/{collectedSourceCount} {sourceKind} sources removedUnreadableMeshes={sourceFilter.RemovedUnreadableMeshes} floorFallbacks={sourceFilter.FloorFallbacks} roomTemplateSources={roomTemplateSources.Sources} roomTemplateRooms={roomTemplateSources.Rooms} missingRoomTemplates={roomTemplateSources.MissingRooms} anchorFloorFallbacks={anchorFloorFallbacks} doorBridgeSources={doorBridgeSources} offMeshLinks={offMeshLinks} bounds center=({bounds.center.x:F1},{bounds.center.y:F1},{bounds.center.z:F1}) size=({bounds.size.x:F1},{bounds.size.y:F1},{bounds.size.z:F1}) settings=(radius={settings.agentRadius:F2},height={settings.agentHeight:F2},slope={settings.agentSlope:F1},climb={settings.agentClimb:F2},minRegion={settings.minRegionArea:F1}) examples=[{sourceExamples}]. {BuildTriangulationStatus()}"
             : $"{label} bake completed but the NavMeshData instance was not valid.";
         return _hasRuntimeNavMesh;
     }
@@ -958,6 +959,44 @@ internal sealed class FacilityNavMeshService
             {
                 break;
             }
+        }
+
+        return added;
+    }
+
+    private static int AddDoorBridgeSources(List<NavMeshBuildSource> sources, BotBehaviorDefinition behavior)
+    {
+        const int maxDoorBridgeSources = 512;
+        float horizontalSize = Mathf.Clamp(behavior.FacilityRuntimeNavMeshAgentRadius * 8f, 2.2f, 4.0f);
+        Vector3 sourceSize = new(horizontalSize, 0.12f, horizontalSize);
+        HashSet<string> seen = new(StringComparer.Ordinal);
+        int added = 0;
+
+        foreach (Door door in Door.List)
+        {
+            if (added >= maxDoorBridgeSources || door == null || door.IsDestroyed)
+            {
+                continue;
+            }
+
+            Transform? transform = door.Base?.transform;
+            Vector3 origin = transform != null ? transform.position : door.Position;
+            if (!TryFindWalkableFloorNearProbe(origin, out Vector3 floor))
+            {
+                continue;
+            }
+
+            string key = QuantizeSamplePoint(floor, 1.0f);
+            if (!seen.Add(key))
+            {
+                continue;
+            }
+
+            sources.Add(CreateBoxSource(
+                0,
+                Matrix4x4.Translate(floor + (Vector3.down * (sourceSize.y * 0.5f))),
+                sourceSize));
+            added++;
         }
 
         return added;

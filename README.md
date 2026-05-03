@@ -18,7 +18,7 @@ The plugin is built for a local SCP:SL Dedicated Server install and copies itsel
 - Runtime bot commands for count, difficulty, AI mode, map mode, SCP speeds, and close-retreat speed.
 - Human loadout selection with `loadout`, `ld`, or `kit`, plus temporary in-place SCP practice roles.
 - Player-facing `.help` and `.bots setcount <count>` commands with cooldowns.
-- Server Specific Settings GUI for role changes, item/ammo grants, teleport helpers, and bot count changes.
+- Server Specific Settings console for role changes, item/ammo grants, teleport helpers, and bot count changes.
 - Role-default gear or fully custom loadouts with reserve ammo maintenance.
 - Default fallback ammo reserve for role-default firearms, including 9x19 weapons.
 - Native SCP:SL round spawn protection support.
@@ -233,7 +233,7 @@ Temporary SCP loadouts switch you in-place, clear inventory/ammo, and do not bec
 
 `.bots setcount <count>` is available to players with cooldowns: a 60 second global cooldown and a per-player cooldown of 3 minutes plus 0-60 random seconds by default.
 
-Players can open SCP:SL Server Specific Settings for the GUI. Personal actions use a short local cooldown; global bot settings use the shared server cooldown.
+Players can open SCP:SL Server Specific Settings for the console. Personal actions use a short local cooldown; global bot settings use the shared server cooldown.
 
 ## Configuration
 

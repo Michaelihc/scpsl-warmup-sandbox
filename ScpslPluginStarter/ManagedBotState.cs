@@ -134,6 +134,16 @@ internal sealed class ManagedBotState
 
     public int LastRoomCenterTeleportTick { get; set; }
 
+    public int NavMeshStuckNudgeLoopCount { get; set; }
+
+    public int LastNavMeshStuckNudgeTick { get; set; }
+
+    public bool HasSkippedStuckWaypoint { get; set; }
+
+    public UnityEngine.Vector3 LastSkippedStuckWaypoint { get; set; }
+
+    public int LastSkippedStuckWaypointTick { get; set; }
+
     public int LastDoorTeleportTick { get; set; }
 
     public int LastDirectNavigationMoveTick { get; set; }
@@ -166,6 +176,11 @@ internal sealed class ManagedBotState
         LastNavigationStuckRepathTick = 0;
         NavigationStuckRecoveryCount = 0;
         LastRoomCenterTeleportTick = 0;
+        NavMeshStuckNudgeLoopCount = 0;
+        LastNavMeshStuckNudgeTick = 0;
+        HasSkippedStuckWaypoint = false;
+        LastSkippedStuckWaypoint = default;
+        LastSkippedStuckWaypointTick = 0;
         LastDoorTeleportTick = 0;
         LastDirectNavigationMoveTick = 0;
         HasDirectNavigationSafePosition = false;

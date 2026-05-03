@@ -30,6 +30,8 @@ internal sealed class BotControllerService
     private const int ForwardRecoverySidestepMinMs = 450;
     private const int FallbackFireAfterVisibleMs = 900;
     private const int CloseRetreatLockMs = 450;
+    private const int NavMeshStuckNudgeLoopWindowMs = 6000;
+    private const int NavMeshStuckNudgeLoopEscalationCount = 4;
 
     private readonly BotNavigationService _navigationService = new();
     private readonly BotTargetingService _targetingService = new();
@@ -115,6 +117,8 @@ internal sealed class BotControllerService
                     behavior,
                     random,
                     useDust2Arena,
+                    useNavMesh,
+                    navMeshSampleDistance,
                     canUseScpAttack,
                     tryInvokeDummyActions,
                     tryInvokeDummyAction,
@@ -164,7 +168,7 @@ internal sealed class BotControllerService
         if (canMove && !closeRetreatLockActive)
         {
             navTarget = useNavMesh
-                ? _navigationService.ResolveMoveTarget(bot, state, moveGoal, players, behavior, useNavMesh, navMeshSampleDistance, useSwiftStyleNavMeshPath: false, stopOnNavigationFailure, logNavDebug)
+                ? _navigationService.ResolveMoveTarget(bot, state, moveGoal, players, behavior, useNavMesh, navMeshSampleDistance, useSwiftStyleNavMeshPath: !useDust2Arena, stopOnNavigationFailure, logNavDebug)
                 : moveGoal;
             hasActiveNavigation = useNavMesh && _navigationService.HasActivePath(state);
         }
@@ -192,7 +196,7 @@ internal sealed class BotControllerService
             : 0f;
         bool useNavigationAim = canMove
             && hasActiveNavigation
-            && target?.HasLineOfSight != true
+            && ShouldAimAtNavigationTarget(bot, target, activeBehavior, navTarget, navDistance)
             && navDistance > Mathf.Max(behavior.NavWaypointReachDistance * 1.25f, 1.2f)
             && state.AiState != BotAiState.Camp;
         Vector3 aimPoint = ResolveAimPoint(state, target, navTarget, bot.Position, useNavigationAim);
@@ -316,6 +320,8 @@ internal sealed class BotControllerService
         BotBehaviorDefinition behavior,
         System.Random random,
         bool useDust2Arena,
+        bool useNavMesh,
+        float navMeshSampleDistance,
         bool allowForwardRecoveryJump,
         Func<Player, IEnumerable<string>, bool> tryInvokeDummyActions,
         Func<Player, string, bool> tryInvokeDummyAction,
@@ -356,26 +362,61 @@ internal sealed class BotControllerService
         }
 
         Vector3 moveGoal = state.PatrolTarget;
-        if (TryHandleNearbyDoor(bot, state, behavior, moveGoal, useDust2Arena, logNavDebug, nowTick))
+        Vector3 navTarget = moveGoal;
+        bool hasActiveNavigation = false;
+        if (useNavMesh)
+        {
+            navTarget = _navigationService.ResolveMoveTarget(
+                bot,
+                state,
+                moveGoal,
+                players,
+                behavior,
+                useRuntimeNavMesh: true,
+                runtimeNavMeshSampleDistance: navMeshSampleDistance,
+                useSwiftStyleNavMeshPath: !useDust2Arena,
+                stopOnNavigationFailure: true,
+                logNavDebug);
+            hasActiveNavigation = _navigationService.HasActivePath(state);
+            if (!hasActiveNavigation)
+            {
+                state.HasPatrolTarget = false;
+                ClearMoveIntent(state);
+                return false;
+            }
+        }
+
+        if (TryHandleNearbyDoor(bot, state, behavior, navTarget, useDust2Arena, logNavDebug, nowTick))
         {
             return true;
         }
 
-        _aimService.AimAtPoint(bot, state, moveGoal, behavior, tryInvokeDummyAction, NoAimLog);
+        _aimService.AimAtPoint(bot, state, navTarget, behavior, tryInvokeDummyAction, NoAimLog);
 
         if (TryApplyForwardRecoverySidestep(bot, state, behavior, tryInvokeDummyActions, nowTick))
         {
             return true;
         }
 
-        Vector3 patrolDirection = moveGoal - bot.Position;
+        Vector3 patrolDirection = navTarget - bot.Position;
         patrolDirection.y = 0f;
         patrolDirection += BuildSeparationDirection(bot, players, behavior.NearbyBotAvoidanceRadius) * SeparationWeight;
-        if (TryMoveTowardDirection(bot, patrolDirection, behavior, tryInvokeDummyActions, allowBackward: false, out string moveLabel))
+        float navDistance = hasActiveNavigation ? HorizontalDistance(bot.Position, navTarget) : 0f;
+        float navStepDistance = hasActiveNavigation
+            ? Mathf.Clamp(navDistance * 0.85f, 0.15f, behavior.NavMeshCornerMoveMaxStep)
+            : float.PositiveInfinity;
+        if (TryMoveTowardDirection(bot, patrolDirection, behavior, tryInvokeDummyActions, allowBackward: false, out string moveLabel, navStepDistance))
         {
             RecordMoveIntent(state, $"patrol-{moveLabel}", nowTick);
             MaybeTriggerForwardRecoveryJump(bot, state, behavior, tryInvokeDummyActions, nowTick, allowForwardRecoveryJump);
-            MaybeLogNavigationExecution(bot, state, null, behavior, false, false, moveGoal, "patrol", logNavDebug, nowTick);
+            if (hasActiveNavigation)
+            {
+                LogNavigationMove(bot, state, behavior, null, navTarget, navDistance, navStepDistance, moveLabel, "patrol-nav", logNavDebug, nowTick);
+            }
+            else
+            {
+                MaybeLogNavigationExecution(bot, state, null, behavior, false, false, moveGoal, "patrol", logNavDebug, nowTick);
+            }
             return true;
         }
 
@@ -655,7 +696,7 @@ internal sealed class BotControllerService
             purePathDirection.y = 0f;
             float navDistance = HorizontalDistance(bot.Position, navTarget);
             float navStepDistance = Mathf.Clamp(navDistance * 0.85f, 0.15f, behavior.NavMeshCornerMoveMaxStep);
-            if (TryMoveForwardOnNavigationPath(bot, purePathDirection, behavior, tryInvokeDummyActions, out string pathMoveLabel, navStepDistance))
+            if (TryMoveTowardDirection(bot, purePathDirection, behavior, tryInvokeDummyActions, allowBackward: false, out string pathMoveLabel, navStepDistance))
             {
                 RecordMoveIntent(state, pathMoveLabel, nowTick);
                 MaybeTriggerForwardRecoveryJump(bot, state, behavior, tryInvokeDummyActions, nowTick, useScpForwardStrafe);
@@ -784,7 +825,11 @@ internal sealed class BotControllerService
     {
         if (useDust2Arena
             || !behavior.FacilityNavMeshDirectPositionControl
-            || !hasActiveNavigation)
+            || !hasActiveNavigation
+            || state.NavigationAgent == null
+            || !state.NavigationAgent.enabled
+            || !state.NavigationAgent.isOnNavMesh
+            || !state.LastNavigationReason.StartsWith("navmesh-agent", StringComparison.Ordinal))
         {
             return false;
         }
@@ -928,6 +973,38 @@ internal sealed class BotControllerService
         }
 
         return fallback;
+    }
+
+    private static bool ShouldAimAtNavigationTarget(
+        Player bot,
+        BotTargetSelection? target,
+        BotBehaviorDefinition activeBehavior,
+        Vector3 navigationTarget,
+        float navDistance)
+    {
+        if (target?.HasLineOfSight != true)
+        {
+            return true;
+        }
+
+        float effectiveRange = Mathf.Max(0.5f, activeBehavior.PreferredRange + activeBehavior.RangeTolerance);
+        if (target.Distance <= effectiveRange)
+        {
+            return false;
+        }
+
+        Vector3 toNavigationTarget = navigationTarget - bot.Position;
+        toNavigationTarget.y = 0f;
+        if (toNavigationTarget.sqrMagnitude < 0.0001f)
+        {
+            return false;
+        }
+
+        float movementYaw = NormalizeSignedAngle(bot.LookRotation.y);
+        Vector3 forward = Quaternion.Euler(0f, movementYaw, 0f) * Vector3.forward;
+        float forwardDot = Vector3.Dot(toNavigationTarget.normalized, forward);
+        float offAxisThreshold = Mathf.Cos(55f * Mathf.Deg2Rad);
+        return navDistance > 2.5f && forwardDot < offAxisThreshold;
     }
 
     private static void RefreshStrafe(ManagedBotState state, System.Random random, int nowTick)
@@ -1559,7 +1636,18 @@ internal sealed class BotControllerService
 
         if (recentMoveIntent)
         {
-            if (movedDistance < behavior.StuckDistanceThreshold)
+            float threshold = Mathf.Max(0.05f, behavior.StuckDistanceThreshold);
+            if (!state.HasStallAnchor)
+            {
+                state.HasStallAnchor = true;
+                state.StallAnchorPosition = bot.Position;
+                state.StallAnchorSinceTick = nowTick;
+            }
+
+            Vector3 anchor = state.StallAnchorPosition;
+            anchor.y = 0f;
+            float anchorDistance = Vector3.Distance(current, anchor);
+            if (movedDistance < threshold && anchorDistance < threshold)
             {
                 state.StuckTicks++;
                 if (state.ForwardStallSinceTick == 0)
@@ -1572,12 +1660,16 @@ internal sealed class BotControllerService
                 state.StuckTicks = 0;
                 state.ForwardStallSinceTick = 0;
                 state.NavigationStuckRecoveryCount = 0;
+                state.StallAnchorPosition = bot.Position;
+                state.StallAnchorSinceTick = nowTick;
             }
         }
         else
         {
             state.StuckTicks = 0;
             state.ForwardStallSinceTick = 0;
+            state.HasStallAnchor = false;
+            state.StallAnchorSinceTick = 0;
         }
 
         state.LastPosition = bot.Position;
@@ -1599,6 +1691,14 @@ internal sealed class BotControllerService
 
         state.LastNavigationStuckRepathTick = nowTick;
         state.NavigationStuckRecoveryCount++;
+        bool repeatedNudgeLoop = IsRecentNavMeshStuckNudgeLoop(state, nowTick);
+        if (repeatedNudgeLoop)
+        {
+            state.NavigationStuckRecoveryCount = Math.Max(
+                state.NavigationStuckRecoveryCount,
+                Math.Max(1, behavior.NavMeshRoomCenterTeleportRecoveryCount));
+        }
+
         state.ForwardBlockedUntilTick = 0;
         state.LeftBlockedUntilTick = 0;
         state.RightBlockedUntilTick = 0;
@@ -1611,6 +1711,7 @@ internal sealed class BotControllerService
             state.StuckTicks = 0;
             state.ForwardStallSinceTick = 0;
             state.NavigationStuckRecoveryCount = 0;
+            ResetNavMeshStuckNudgeLoop(state);
             state.LastPosition = bot.Position;
             return;
         }
@@ -1634,11 +1735,20 @@ internal sealed class BotControllerService
             state.StuckTicks = 0;
             state.ForwardStallSinceTick = 0;
             state.NavigationStuckRecoveryCount = 0;
+            ResetNavMeshStuckNudgeLoop(state);
             state.LastPosition = bot.Position;
             return;
         }
 
-        if (TryApplyNavMeshStuckNudge(bot, state, behavior, logNavDebug))
+        if (repeatedNudgeLoop)
+        {
+            logNavDebug(
+                bot,
+                state,
+                $"stuck-nudge-escalate count={state.NavMeshStuckNudgeLoopCount} move={state.LastMoveIntentLabel} pos=({bot.Position.x:F1},{bot.Position.y:F1},{bot.Position.z:F1})");
+        }
+
+        if (!repeatedNudgeLoop && TryApplyNavMeshStuckNudge(bot, state, behavior, logNavDebug, nowTick))
         {
             logNavDebug(
                 bot,
@@ -1658,6 +1768,7 @@ internal sealed class BotControllerService
                 $"stuck-detour ticks={state.StuckTicks} move={state.LastMoveIntentLabel} pos=({bot.Position.x:F1},{bot.Position.y:F1},{bot.Position.z:F1})");
             state.StuckTicks = 0;
             state.ForwardStallSinceTick = 0;
+            ResetNavMeshStuckNudgeLoop(state);
             return;
         }
 
@@ -1668,10 +1779,12 @@ internal sealed class BotControllerService
                 state,
                 $"stuck-advance ticks={state.StuckTicks} move={state.LastMoveIntentLabel} pos=({bot.Position.x:F1},{bot.Position.y:F1},{bot.Position.z:F1})");
             state.StuckTicks = 0;
+            ResetNavMeshStuckNudgeLoop(state);
             return;
         }
 
         _navigationService.ForceRepath(state, "stuck-repath");
+        ResetNavMeshStuckNudgeLoop(state);
         logNavDebug(
             bot,
             state,
@@ -1684,6 +1797,18 @@ internal sealed class BotControllerService
         return state.ForwardStallSinceTick == 0
             ? 0
             : Math.Max(0, unchecked(nowTick - state.ForwardStallSinceTick));
+    }
+
+    private static bool IsRecentNavMeshStuckNudgeLoop(ManagedBotState state, int nowTick)
+    {
+        return state.NavMeshStuckNudgeLoopCount >= NavMeshStuckNudgeLoopEscalationCount
+            && unchecked(nowTick - state.LastNavMeshStuckNudgeTick) <= NavMeshStuckNudgeLoopWindowMs;
+    }
+
+    private static void ResetNavMeshStuckNudgeLoop(ManagedBotState state)
+    {
+        state.NavMeshStuckNudgeLoopCount = 0;
+        state.LastNavMeshStuckNudgeTick = 0;
     }
 
     private static bool IsForwardClipBlocked(Player bot, Vector3 position, Vector3 direction, float step)
@@ -2078,7 +2203,8 @@ internal sealed class BotControllerService
         Player bot,
         ManagedBotState state,
         BotBehaviorDefinition behavior,
-        Action<Player, ManagedBotState, string> logNavDebug)
+        Action<Player, ManagedBotState, string> logNavDebug,
+        int nowTick)
     {
         if (!behavior.NavMeshStuckNudgeEnabled
             || !string.Equals(state.LastNavigationReason, "navmesh-swift-corners", StringComparison.Ordinal)
@@ -2140,10 +2266,17 @@ internal sealed class BotControllerService
         state.LastDirectNavigationMoveTick = Environment.TickCount;
         state.LastMoveIntentLabel = "navmesh-stuck-nudge";
         state.LastMoveIntentTick = state.LastDirectNavigationMoveTick;
+        if (unchecked(nowTick - state.LastNavMeshStuckNudgeTick) > NavMeshStuckNudgeLoopWindowMs)
+        {
+            state.NavMeshStuckNudgeLoopCount = 0;
+        }
+
+        state.NavMeshStuckNudgeLoopCount++;
+        state.LastNavMeshStuckNudgeTick = nowTick;
         logNavDebug(
             bot,
             state,
-            $"navmesh-stuck-nudge from=({currentHit.position.x:F1},{currentHit.position.y:F1},{currentHit.position.z:F1}) to=({stepHit.position.x:F1},{stepHit.position.y:F1},{stepHit.position.z:F1}) wp=({waypoint.x:F1},{waypoint.y:F1},{waypoint.z:F1}) dist={waypointDistance:F2}");
+            $"navmesh-stuck-nudge count={state.NavMeshStuckNudgeLoopCount} from=({currentHit.position.x:F1},{currentHit.position.y:F1},{currentHit.position.z:F1}) to=({stepHit.position.x:F1},{stepHit.position.y:F1},{stepHit.position.z:F1}) wp=({waypoint.x:F1},{waypoint.y:F1},{waypoint.z:F1}) dist={waypointDistance:F2}");
         return true;
     }
 

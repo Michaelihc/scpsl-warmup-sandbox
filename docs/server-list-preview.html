@@ -226,31 +226,31 @@
         <label class="wide">
           服务器介绍
           <textarea id="edit-description">&lt;size=125%&gt;&lt;color=#ff3333&gt;&lt;b&gt;[CN]&lt;/b&gt;&lt;/color&gt; &lt;color=#00ffff&gt;&lt;b&gt;[公测]&lt;/b&gt;&lt;/color&gt; &lt;color=#ffff00&gt;&lt;b&gt;人机战斗服&lt;/b&gt;&lt;/color&gt;&lt;/size&gt;
-&lt;color=#00ff88&gt;&lt;b&gt;任何人都能使用练习控制台！&lt;/b&gt;&lt;/color&gt;
-&lt;color=#ffcc00&gt;控制台只能刷物品、改变阵营和传送；有冷却限制，其他管理功能不会生效。&lt;/color&gt;
-&lt;color=#66ccff&gt;也欢迎看看 Site02 社区服：180.188.21.98:65535&lt;/color&gt;
+&lt;color=#00ff88&gt;&lt;b&gt;人人都能使用控制台！&lt;/b&gt;&lt;/color&gt;
+&lt;color=#ffcc00&gt;控制台仅可刷取物品、切换阵营与传送；设有冷却时间，不开放其他管理功能。&lt;/color&gt;
+&lt;color=#66ccff&gt;也欢迎访问 Site02 社区服：180.188.21.98:65535&lt;/color&gt;
 &lt;color=#66ccff&gt;联系方式：fsp9fromsl@outlook.com / QQ：3874925846（水泥）&lt;/color&gt;
 
-&lt;color=#ffcc00&gt;&lt;b&gt;人机练枪 / SCP 练习 / 公共练习控制台&lt;/b&gt;&lt;/color&gt;
+&lt;color=#ffcc00&gt;&lt;b&gt;人机练枪 / SCP 练习 / 公共控制台&lt;/b&gt;&lt;/color&gt;
 
 &lt;color=#66ff99&gt;进服即可开练，空服也有机器人陪打。&lt;/color&gt;
 
-&lt;color=#ff6633&gt;&lt;b&gt;==== 服务器特色 ====&lt;/b&gt;&lt;/color&gt;
+&lt;align=center&gt;&lt;color=#ff6633&gt;&lt;b&gt;==== 服务器特色 ====&lt;/b&gt;&lt;/color&gt;&lt;/align&gt;
 &lt;color=#00ff88&gt;1.&lt;/color&gt; 自动生成战斗机器人，适合热身、压枪、走位和 SCP 对抗练习。
 &lt;color=#00ff88&gt;2.&lt;/color&gt; 玩家可选择人类装备，也可临时切换为 173 / 939 / 106 / 049 / 096 / 3114。
 &lt;color=#00ff88&gt;3.&lt;/color&gt; 所有人都可在 &lt;color=#ffff00&gt;服务器专属设置（Server Specific Settings）&lt;/color&gt; 中使用人机控制台，仅开放换阵营、传送和发物品。
-&lt;color=#00ff88&gt;4.&lt;/color&gt; 空服自动保留少量机器人，随时进服都能开始练。
+&lt;color=#00ff88&gt;4.&lt;/color&gt; 即使空服也会自动保留少量机器人，随时进服即可开练。
 
-&lt;color=#ff6633&gt;&lt;b&gt;==== 常用命令 ====&lt;/b&gt;&lt;/color&gt;
+&lt;align=center&gt;&lt;color=#ff6633&gt;&lt;b&gt;==== 常用命令 ====&lt;/b&gt;&lt;/color&gt;&lt;/align&gt;
+&lt;color=#ffff00&gt;服务器专属设置（Server Specific Settings）&lt;/color&gt; 打开人机控制台（阵营/物品/传送/机器人）
 &lt;color=#ffff00&gt;.help&lt;/color&gt; 查看帮助
 &lt;color=#ffff00&gt;.loadout&lt;/color&gt; 选择人类装备
 &lt;color=#ffff00&gt;.loadout 939 / 173 / 106 / 049 / 096 / 3114&lt;/color&gt; 临时变成 SCP
 &lt;color=#ffff00&gt;.bots setcount 数量&lt;/color&gt; 调整机器人数量
-&lt;color=#ffff00&gt;服务器专属设置（Server Specific Settings）&lt;/color&gt; 打开人机控制台（阵营/物品/传送/机器人）
 
-&lt;color=#ff3333&gt;&lt;b&gt;==== 注意事项 ====&lt;/b&gt;&lt;/color&gt;
+&lt;align=center&gt;&lt;color=#ff3333&gt;&lt;b&gt;==== 注意事项 ====&lt;/b&gt;&lt;/color&gt;&lt;/align&gt;
 &lt;color=#ffcc00&gt;本服仍在公测开发中，机器人行为和功能会继续调整。&lt;/color&gt;
-请勿恶意刷命令、卡 BUG、干扰他人练习或使用第三方作弊工具。
+请勿恶意刷命令、利用 BUG、干扰他人练习或使用第三方作弊工具。
 进入服务器即代表你愿意遵守以上规则。</textarea>
         </label>
       </div>
@@ -335,7 +335,9 @@
         .replace(/&lt;color=(#[0-9a-fA-F]{3,8}|[a-zA-Z]+)&gt;/gi, '<span style="color:$1">')
         .replace(/&lt;\/color&gt;/gi, "</span>")
         .replace(/&lt;size=([0-9]{1,3})%&gt;/gi, '<span style="font-size:$1%">')
-        .replace(/&lt;\/size&gt;/gi, "</span>");
+        .replace(/&lt;\/size&gt;/gi, "</span>")
+        .replace(/&lt;align=center&gt;/gi, '<div style="text-align:center">')
+        .replace(/&lt;\/align&gt;/gi, "</div>");
     }
 
     function render() {

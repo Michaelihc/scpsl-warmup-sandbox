@@ -16,6 +16,8 @@ internal sealed class BotNavigationService
     private const float WaypointGoalReachDistance = 1.2f;
     private const float TightWaypointCompletionDistance = 1.45f;
     private const float StuckWaypointSoftAdvanceDistance = 2.4f;
+    private const float SkippedStuckWaypointMatchDistance = 0.85f;
+    private const int SkippedStuckWaypointMemoryMs = 5000;
     private const float MaxWaypointVerticalDelta = 3.25f;
     private const float AgentProxyWarpDistance = 2.0f;
     private static readonly float[] AgentPlacementVerticalOffsets = { 0.0f, 0.05f, 0.25f, 0.5f };
@@ -113,7 +115,37 @@ internal sealed class BotNavigationService
             $"fallback reason={(useRuntimeNavMesh ? "navmesh-path-failed" : "navmesh-unavailable")} stop={stopOnNavigationFailure} " +
             $"bot={FormatWaypoint(bot.Position)} target={FormatWaypoint(targetPosition)} sample={runtimeNavMeshSampleDistance:F1}");
         ClearPath(state, targetPosition, useRuntimeNavMesh ? "navmesh-path-failed" : "navmesh-unavailable");
+        if (useRuntimeNavMesh && IsUnsafeRawNavigationFallback(bot.Position, targetPosition, behavior, runtimeNavMeshSampleDistance))
+        {
+            logNavDebug(
+                bot,
+                state,
+                $"fallback-blocked reason=unsafe-raw-target bot={FormatWaypoint(bot.Position)} target={FormatWaypoint(targetPosition)}");
+            return bot.Position;
+        }
+
         return stopOnNavigationFailure ? bot.Position : targetPosition;
+    }
+
+    private static bool IsUnsafeRawNavigationFallback(
+        Vector3 botPosition,
+        Vector3 targetPosition,
+        BotBehaviorDefinition behavior,
+        float sampleDistance)
+    {
+        float maxRawVerticalDelta = Mathf.Max(12.0f, behavior.FacilityRuntimeNavMeshAgentHeight * 6.0f);
+        if (Mathf.Abs(targetPosition.y - botPosition.y) > maxRawVerticalDelta)
+        {
+            return true;
+        }
+
+        float safeSampleDistance = Mathf.Clamp(sampleDistance, 0.75f, 4.0f);
+        if (!NavMesh.SamplePosition(targetPosition, out NavMeshHit targetHit, safeSampleDistance, NavMesh.AllAreas))
+        {
+            return true;
+        }
+
+        return Mathf.Abs(targetHit.position.y - targetPosition.y) > maxRawVerticalDelta;
     }
 
     private static float GetNavigationTargetDelta(Vector3 previousTarget, Vector3 currentTarget, bool useFull3D)
@@ -194,6 +226,9 @@ internal sealed class BotNavigationService
         }
 
         state.NavigationWaypointIndex++;
+        state.HasSkippedStuckWaypoint = true;
+        state.LastSkippedStuckWaypoint = waypoint;
+        state.LastSkippedStuckWaypointTick = Environment.TickCount;
         state.LastMoveUsedNavigation = true;
         state.LastNavigationReason = "stuck-skip-close-corner";
         logNavDebug(
@@ -433,6 +468,16 @@ internal sealed class BotNavigationService
         out Vector3 moveTarget)
     {
         moveTarget = sampledTarget;
+        if (HorizontalDistance(sampledStart, sampledTarget) <= Mathf.Max(behavior.NavWaypointReachDistance, 1.3f)
+            && Mathf.Abs(sampledStart.y - sampledTarget.y) <= MaxWaypointVerticalDelta)
+        {
+            ClearPath(state, sampledTarget, "navmesh-close-target");
+            state.LastNavigationTarget = sampledTarget;
+            state.LastNavigationRecomputeTick = nowTick;
+            moveTarget = sampledTarget;
+            logNavDebug(bot, state, $"swift-close-target target={FormatWaypoint(sampledTarget)} start={FormatWaypoint(sampledStart)}");
+            return true;
+        }
 
         bool targetMoved = GetNavigationTargetDelta(
             state.LastNavigationTarget,
@@ -450,10 +495,32 @@ internal sealed class BotNavigationService
 
             state.NavigationWaypoints.Clear();
             Vector3[] corners = path.corners ?? Array.Empty<Vector3>();
+            if (path.status != NavMeshPathStatus.PathComplete)
+            {
+                Vector3 partialEnd = corners.Length > 0 ? corners[corners.Length - 1] : sampledStart;
+                if (Mathf.Abs(partialEnd.y - sampledTarget.y) > MaxWaypointVerticalDelta)
+                {
+                    logNavDebug(
+                        bot,
+                        state,
+                        $"swift-partial-rejected start={FormatWaypoint(sampledStart)} partialEnd={FormatWaypoint(partialEnd)} target={FormatWaypoint(sampledTarget)}");
+                    return false;
+                }
+            }
+
             for (int i = 0; i < corners.Length; i++)
             {
                 if (i == 0 && HorizontalDistance(sampledStart, corners[i]) <= Mathf.Max(behavior.NavWaypointReachDistance, 0.75f))
                 {
+                    continue;
+                }
+
+                if (ShouldSuppressRecentlySkippedStuckWaypoint(state, corners[i], sampledStart, behavior, nowTick))
+                {
+                    logNavDebug(
+                        bot,
+                        state,
+                        $"swift-skip-remembered-stuck-corner point={FormatWaypoint(corners[i])} start={FormatWaypoint(sampledStart)}");
                     continue;
                 }
 
@@ -1603,6 +1670,32 @@ internal sealed class BotNavigationService
     {
         return state.NavigationWaypointIndex >= 0
             && state.NavigationWaypointIndex < state.NavigationWaypoints.Count;
+    }
+
+    private static bool ShouldSuppressRecentlySkippedStuckWaypoint(
+        ManagedBotState state,
+        Vector3 candidate,
+        Vector3 sampledStart,
+        BotBehaviorDefinition behavior,
+        int nowTick)
+    {
+        if (!state.HasSkippedStuckWaypoint
+            || unchecked(nowTick - state.LastSkippedStuckWaypointTick) > SkippedStuckWaypointMemoryMs)
+        {
+            return false;
+        }
+
+        float rememberedDistance = HorizontalDistance(candidate, state.LastSkippedStuckWaypoint);
+        if (rememberedDistance > SkippedStuckWaypointMatchDistance
+            || Mathf.Abs(candidate.y - state.LastSkippedStuckWaypoint.y) > MaxWaypointVerticalDelta)
+        {
+            return false;
+        }
+
+        float softAdvanceDistance = Mathf.Max(
+            StuckWaypointSoftAdvanceDistance,
+            behavior.NavWaypointReachDistance * 2.5f);
+        return HorizontalDistance(sampledStart, candidate) <= softAdvanceDistance + 0.75f;
     }
 
     private static bool ShouldSoftAdvanceGateBridge(ManagedBotState state, Vector3 waypoint, float waypointDistance, Vector3 botPosition)
