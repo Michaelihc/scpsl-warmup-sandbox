@@ -75,7 +75,7 @@ DRY_RUN="$9"
 
 plugin_path="$REMOTE_PLUGIN_DIR/ScpslPluginStarter.dll"
 signal_path="$REMOTE_CONFIG_DIR/live-update-warning.txt"
-broadcast_command="broadcast $WARNING_SECONDS $WARNING_MESSAGE"
+broadcast_command="bc $WARNING_SECONDS $WARNING_MESSAGE"
 
 run() {
     if [ "$DRY_RUN" = "1" ]; then
@@ -90,10 +90,49 @@ find_localadmin_pids() {
     pgrep -u "$REMOTE_RUN_USER" -f "LocalAdmin( |$|.* $PORT)" 2>/dev/null || pgrep -f "LocalAdmin( |$|.* $PORT)" 2>/dev/null || true
 }
 
+find_console_port() {
+    ps -eo user,args \
+        | awk -v run_user="$REMOTE_RUN_USER" -v port="-port$PORT" '
+            $1 == run_user && index($0, "SCPSL.x86_64") && index($0, port) {
+                for (i = 1; i <= NF; i++) {
+                    if ($i ~ /^-console[0-9]+$/) {
+                        value = $i
+                        sub(/^-console/, "", value)
+                        print value
+                        exit
+                    }
+                }
+            }'
+}
+
+send_localadmin_tcp_command() {
+    command="$1"
+    console_port="$(find_console_port)"
+    if [ -z "$console_port" ]; then
+        echo "Could not find LocalAdmin TCP console port." >&2
+        return 1
+    fi
+
+    if [ "$DRY_RUN" = "1" ]; then
+        printf '[dry-run] LocalAdmin TCP 127.0.0.1:%s command: %s\n' "$console_port" "$command"
+        return 0
+    fi
+
+    COMMAND="$command" CONSOLE_PORT="$console_port" python3 - <<'PY'
+import os
+import socket
+
+port = int(os.environ["CONSOLE_PORT"])
+command = os.environ["COMMAND"] + "\n"
+with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
+    sock.sendall(command.encode("utf-8"))
+PY
+}
+
 send_localadmin_command() {
     command="$1"
     if [ "$DRY_RUN" = "1" ]; then
-        printf '[dry-run] LocalAdmin command: %s\n' "$command"
+        send_localadmin_tcp_command "$command" || printf '[dry-run] LocalAdmin command: %s\n' "$command"
         return 0
     fi
 
@@ -112,7 +151,7 @@ send_localadmin_command() {
     done
 
     echo "Could not write to LocalAdmin stdin; skipping pre-restart broadcast." >&2
-    return 1
+    send_localadmin_tcp_command "$command"
 }
 
 echo "Sending Chinese restart warning: $WARNING_MESSAGE"
@@ -152,7 +191,7 @@ sleep 5
 pkill -KILL -u "$REMOTE_RUN_USER" -f "SCPSL.x86_64" 2>/dev/null || true
 pkill -KILL -u "$REMOTE_RUN_USER" -f "LocalAdmin" 2>/dev/null || true
 
-runuser -u "$REMOTE_RUN_USER" -- bash -lc "cd '$REMOTE_SERVER_DIR' && nohup ./LocalAdmin '$PORT' >> '$REMOTE_SERVER_DIR/localadmin-live-update.log' 2>&1 &"
+runuser -u "$REMOTE_RUN_USER" -- bash -lc "cd '$REMOTE_SERVER_DIR' && setsid -f ./LocalAdmin '$PORT' >> '$REMOTE_SERVER_DIR/localadmin-live-update.log' 2>&1 < /dev/null"
 echo "Live restart requested. LocalAdmin log: $REMOTE_SERVER_DIR/localadmin-live-update.log"
 '@
 
