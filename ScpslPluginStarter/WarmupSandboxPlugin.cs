@@ -42,6 +42,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private const int NavHeartbeatIntervalMs = 5000;
     private const int LiveUpdateSignalPollIntervalMs = 1000;
     private const string LiveUpdateSignalFileName = "live-update-warning.txt";
+    private const string HotConfigReloadSignalFileName = "hot-reload-config.txt";
     private const int MinimumAutoCleanupIntervalMs = 10000;
     private const int ArmorPickupSanitizerIntervalMs = 1000;
     private const int DroppedArmorPickupDestroyDelayMs = 1;
@@ -237,6 +238,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     {
         Instance = this;
         WarmupLocalization.SetLanguage(Config.Language);
+        ClampConfiguredLimits();
         ApplyDifficultyPreset(Config.DifficultyPreset, persist: false);
         ApplyNativeSpawnProtectionConfig();
         _playtimeTrackerService.Enable(Config.PlaytimeTracking);
@@ -820,6 +822,17 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
         ApiLogger.Warn($"[{Name}] Configured bot count {Config.BotCount} exceeds max {Config.MaxBotCount}; clamping to {clamped}.");
         Config.BotCount = clamped;
+    }
+
+    private void ClampConfiguredLimits()
+    {
+        if (Config.MaxBotCount >= 0)
+        {
+            return;
+        }
+
+        ApiLogger.Warn($"[{Name}] Configured max bot count {Config.MaxBotCount} is negative; clamping to 0.");
+        Config.MaxBotCount = 0;
     }
 
     private void SpawnBot(int generation)
@@ -2851,12 +2864,13 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
 
         TryProcessLiveUpdateSignal();
+        TryProcessHotConfigReloadSignal();
         ScheduleLiveUpdateSignalPoll();
     }
 
     private void TryProcessLiveUpdateSignal()
     {
-        foreach (string signalPath in GetLiveUpdateSignalPaths())
+        foreach (string signalPath in GetConfigSignalPaths(LiveUpdateSignalFileName))
         {
             if (!File.Exists(signalPath))
             {
@@ -2886,7 +2900,34 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
     }
 
-    private static IEnumerable<string> GetLiveUpdateSignalPaths()
+    private void TryProcessHotConfigReloadSignal()
+    {
+        bool shouldReload = false;
+        foreach (string signalPath in GetConfigSignalPaths(HotConfigReloadSignalFileName))
+        {
+            if (!File.Exists(signalPath))
+            {
+                continue;
+            }
+
+            try
+            {
+                File.Delete(signalPath);
+                shouldReload = true;
+            }
+            catch (Exception exception)
+            {
+                ApiLogger.Warn($"[{Name}] Failed to process hot config reload signal '{signalPath}': {exception.Message}");
+            }
+        }
+
+        if (shouldReload)
+        {
+            ReloadCurrentConfig(out _);
+        }
+    }
+
+    private static IEnumerable<string> GetConfigSignalPaths(string fileName)
     {
         string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
         if (string.IsNullOrWhiteSpace(appData))
@@ -2902,7 +2943,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
         foreach (string portDirectory in Directory.GetDirectories(labApiConfigRoot))
         {
-            yield return Path.Combine(portDirectory, "WarmupSandbox", LiveUpdateSignalFileName);
+            yield return Path.Combine(portDirectory, "WarmupSandbox", fileName);
         }
     }
 
@@ -3620,7 +3661,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     public string BuildStatus()
     {
-        return $"active={_warmupActive}, roundStarted={Round.IsRoundStarted}, bots={_managedBots.Count}/{Config.BotCount}, humanRole={Config.HumanRole}, botRole={Config.BotRole}, humanRespawnMs={Config.HumanRespawnDelayMs}, botRespawnMs={Config.BotRespawnDelayMs}, difficulty={Config.DifficultyPreset}, aimode={Config.BotBehavior.AiMode}, scpSpeeds=(939:{Config.BotBehavior.FacilityDummyFollowSpeedScp939:F1},3114:{Config.BotBehavior.FacilityDummyFollowSpeedScp3114:F1},049:{Config.BotBehavior.FacilityDummyFollowSpeedScp049:F1},106:{Config.BotBehavior.FacilityDummyFollowSpeedScp106:F1}), bombMode=({_bombModeService.BuildStatus()}), dust2=({_dust2MapService.BuildStatus(Config.Dust2Map)}), facilityNav=({_facilityNavMeshService.BuildStatus(Config.BotBehavior)})";
+        return $"active={_warmupActive}, roundStarted={Round.IsRoundStarted}, bots={_managedBots.Count}/{Config.BotCount}, maxBots={Config.MaxBotCount}, humanRole={Config.HumanRole}, botRole={Config.BotRole}, humanRespawnMs={Config.HumanRespawnDelayMs}, botRespawnMs={Config.BotRespawnDelayMs}, difficulty={Config.DifficultyPreset}, aimode={Config.BotBehavior.AiMode}, scpSpeeds=(939:{Config.BotBehavior.FacilityDummyFollowSpeedScp939:F1},3114:{Config.BotBehavior.FacilityDummyFollowSpeedScp3114:F1},049:{Config.BotBehavior.FacilityDummyFollowSpeedScp049:F1},106:{Config.BotBehavior.FacilityDummyFollowSpeedScp106:F1}), bombMode=({_bombModeService.BuildStatus()}), dust2=({_dust2MapService.BuildStatus(Config.Dust2Map)}), facilityNav=({_facilityNavMeshService.BuildStatus(Config.BotBehavior)})";
     }
 
     public bool StartRoundIfNeeded(out string response)
@@ -3672,6 +3713,45 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     {
         SaveConfig();
         response = "Warmup config saved.";
+        return true;
+    }
+
+    public bool ReloadCurrentConfig(out string response)
+    {
+        int previousBotCount = Config.BotCount;
+        int previousMaxBotCount = Config.MaxBotCount;
+        string previousLanguage = Config.Language;
+        WarmupDifficulty previousDifficulty = Config.DifficultyPreset;
+        WarmupAiMode previousAiMode = Config.BotBehavior.AiMode;
+
+        try
+        {
+            LoadConfigs();
+        }
+        catch (Exception exception)
+        {
+            response = $"Failed to reload Warmup config: {exception.Message}";
+            ApiLogger.Warn($"[{Name}] {response}");
+            return false;
+        }
+
+        WarmupLocalization.SetLanguage(Config.Language);
+        ApplyDifficultyPreset(Config.DifficultyPreset, persist: false);
+        ApplyNativeSpawnProtectionConfig();
+        ClampConfiguredLimits();
+        ClampConfiguredBotCount();
+        ClampSelectedPlayerPanelBotCounts();
+
+        if (_warmupActive)
+        {
+            EnsureBotPopulation(_warmupGeneration);
+            TrimExcessBots();
+        }
+
+        RefreshPlayerPanelSettings(sendToPlayers: true);
+
+        response = $"Warmup config reloaded. bots {previousBotCount}->{Config.BotCount}, maxBots {previousMaxBotCount}->{Config.MaxBotCount}, language {previousLanguage}->{Config.Language}, difficulty {previousDifficulty}->{Config.DifficultyPreset}, aimode {previousAiMode}->{Config.BotBehavior.AiMode}.";
+        ApiLogger.Info($"[{Name}] {response}");
         return true;
     }
 
@@ -3794,6 +3874,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         string[] loadoutOptions = presets.Length == 0
             ? new[] { "Default" }
             : presets.Select(preset => preset.Name).ToArray();
+        int panelMaxBotCount = Math.Max(0, Config.MaxBotCount);
         int defaultBotCount = ClampPanelBotCount(Config.BotCount);
         int defaultDifficulty = Math.Max(0, Array.IndexOf(PlayerPanelDifficulties, Config.DifficultyPreset));
         int defaultAiMode = Math.Max(0, Array.IndexOf(PlayerPanelAiModes, Config.BotBehavior.AiMode));
@@ -3822,7 +3903,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             new SSButton(PlayerPanelRoomTeleportButtonId, WarmupLocalization.T("Apply Room Teleport", "应用房间传送"), WarmupLocalization.T("ROOM TP", "房间传送"), null, WarmupLocalization.T("Teleport to selected room.", "传送到选择的房间。")),
             new SSButton(PlayerPanelBringBotsButtonId, WarmupLocalization.T("Bring Bots", "召回机器人"), WarmupLocalization.T("BRING", "召回"), null, WarmupLocalization.T("Bring bots to you.", "将机器人召回到你身边。")),
             new SSGroupHeader(WarmupLocalization.T("Global Controls", "全局功能"), false, WarmupLocalization.T("Shared cooldown.", "共享冷却。")),
-            new SSSliderSetting(PlayerPanelBotCountSettingId, WarmupLocalization.T("Bot Count", "机器人数量"), 0, 30, defaultBotCount, true, "0", "{0}", WarmupLocalization.T("0-30 bots.", "0-30 个。"), 0, false),
+            new SSSliderSetting(PlayerPanelBotCountSettingId, WarmupLocalization.T("Bot Count", "机器人数量"), 0, panelMaxBotCount, defaultBotCount, true, "0", "{0}", WarmupLocalization.T($"0-{panelMaxBotCount} bots.", $"0-{panelMaxBotCount} 个。"), 0, false),
             new SSButton(PlayerPanelSetBotsButtonId, WarmupLocalization.T("Apply Bot Count", "应用数量"), WarmupLocalization.T("APPLY", "应用"), null, WarmupLocalization.T("Apply bot count.", "应用数量。")),
             new SSDropdownSetting(PlayerPanelDifficultySettingId, WarmupLocalization.T("Difficulty", "难度"), PlayerPanelDifficulties.Select(difficulty => difficulty.ToString()).ToArray(), defaultDifficulty, SSDropdownSetting.DropdownEntryType.HybridLoop, WarmupLocalization.T("Bot difficulty.", "机器人难度。"), 0, false),
             new SSButton(PlayerPanelApplyDifficultyButtonId, WarmupLocalization.T("Apply Difficulty", "应用难度"), WarmupLocalization.T("APPLY", "应用"), null, WarmupLocalization.T("Apply difficulty.", "应用难度。")),
@@ -4597,9 +4678,17 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         return direction.normalized;
     }
 
-    private static int ClampPanelBotCount(int count)
+    private int ClampPanelBotCount(int count)
     {
-        return Math.Max(0, Math.Min(30, count));
+        return ClampBotCount(count);
+    }
+
+    private void ClampSelectedPlayerPanelBotCounts()
+    {
+        foreach (int playerId in _playerPanelSelectedBotCounts.Keys.ToArray())
+        {
+            _playerPanelSelectedBotCounts[playerId] = ClampPanelBotCount(_playerPanelSelectedBotCounts[playerId]);
+        }
     }
 
     private static float ClampCloseRetreatSpeedScale(float scale)

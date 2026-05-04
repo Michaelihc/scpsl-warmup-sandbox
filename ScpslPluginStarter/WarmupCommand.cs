@@ -75,6 +75,12 @@ public sealed class WarmupCommand : ICommand
             case "save":
                 return plugin.SaveCurrentConfig(out response);
 
+            case "reloadconfig":
+            case "configreload":
+            case "hotreload":
+            case "reload":
+                return plugin.ReloadCurrentConfig(out response);
+
             case "updatewarning":
             case "updaterestart":
                 return BroadcastLiveUpdateWarning(plugin, arguments, out response);
@@ -349,8 +355,8 @@ public sealed class WarmupCommand : ICommand
     private static string BuildHelp()
     {
         return WarmupLocalization.T(
-            "bots status | playtime [limit] | updatewarning [seconds] [message] | start | restart | roundrestart | stop | save | set <count> | setcount <count> | set939speed <speed> | set3114speed <speed> | set049speed <speed> | set106speed <speed> | setspeed <speed> | setretreatspeed <scale> | map <bomb|standard|true|false> | difficulty <easy|normal|hard|hardest> | aimode <classic|realistic> | language <en|cn> | set retreatspeed <scale> | set <key> <value>",
-            "bots status | playtime [limit] | updatewarning [秒数] [消息] | start | restart | roundrestart | stop | save | set <数量> | setcount <数量> | set939speed <速度> | set3114speed <速度> | set049speed <速度> | set106speed <速度> | setspeed <速度> | setretreatspeed <倍率> | map <bomb|standard|true|false> | difficulty <easy|normal|hard|hardest> | aimode <classic|realistic> | language <en|cn> | set retreatspeed <倍率> | set <键> <值>");
+            "bots status | playtime [limit] | updatewarning [seconds] [message] | start | restart | roundrestart | stop | save | reloadconfig | set <count> | setcount <count> | set939speed <speed> | set3114speed <speed> | set049speed <speed> | set106speed <speed> | setspeed <speed> | setretreatspeed <scale> | map <bomb|standard|true|false> | difficulty <easy|normal|hard|hardest> | aimode <classic|realistic> | language <en|cn> | set retreatspeed <scale> | set <key> <value>",
+            "bots status | playtime [limit] | updatewarning [秒数] [消息] | start | restart | roundrestart | stop | save | reloadconfig | set <数量> | setcount <数量> | set939speed <速度> | set3114speed <速度> | set049speed <速度> | set106speed <速度> | setspeed <速度> | setretreatspeed <倍率> | map <bomb|standard|true|false> | difficulty <easy|normal|hard|hardest> | aimode <classic|realistic> | language <en|cn> | set retreatspeed <倍率> | set <键> <值>");
     }
 
     private static string BuildPlayerHelp()
