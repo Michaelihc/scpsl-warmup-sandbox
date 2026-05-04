@@ -39,7 +39,7 @@ public sealed class PluginConfig
 
     public bool EnableSpawnProtection { get; set; } = true;
 
-    public int SpawnProtectionDurationMs { get; set; } = 3000;
+    public int SpawnProtectionDurationMs { get; set; } = 5000;
 
     public bool AutoCleanupEnabled { get; set; } = true;
 
@@ -62,6 +62,10 @@ public sealed class PluginConfig
     public int PlayerPanelCooldownSeconds { get; set; } = 180;
 
     public int PlayerPanelCooldownJitterSeconds { get; set; } = 60;
+
+    public TextChatConfig TextChat { get; set; } = new();
+
+    public PlaytimeTrackingConfig PlaytimeTracking { get; set; } = new();
 
     public int BotCount { get; set; } = 6;
 
@@ -114,6 +118,42 @@ public sealed class PluginConfig
     public Dust2MapConfig Dust2Map { get; set; } = new();
 
     public BotBehaviorDefinition BotBehavior { get; set; } = new();
+}
+
+public sealed class TextChatConfig
+{
+    public bool Enabled { get; set; } = true;
+
+    public bool AllowPublicChat { get; set; } = true;
+
+    public bool AllowProximityChat { get; set; } = true;
+
+    public bool AllowRadioChat { get; set; } = true;
+
+    public bool AllowTeamChat { get; set; } = true;
+
+    public bool AllowSpectatorsChat { get; set; } = true;
+
+    public bool AllowScpAndHumanPublicChat { get; set; } = true;
+
+    public bool AllowScpAndHumanProximityChat { get; set; } = false;
+
+    public float ProximityChatDistance { get; set; } = 20f;
+
+    public float HintDurationSeconds { get; set; } = 10f;
+
+    public int MaxMessageLength { get; set; } = 160;
+
+    public bool ShowSenderConsoleResponse { get; set; } = true;
+}
+
+public sealed class PlaytimeTrackingConfig
+{
+    public bool Enabled { get; set; } = true;
+
+    public string DataFileName { get; set; } = "playtime.tsv";
+
+    public int FlushIntervalSeconds { get; set; } = 60;
 }
 
 public enum WarmupDifficulty

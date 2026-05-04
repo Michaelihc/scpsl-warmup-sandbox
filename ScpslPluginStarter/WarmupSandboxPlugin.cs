@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text;
 using System.Threading.Tasks;
 using AdminToys;
 using CommandSystem;
@@ -38,6 +40,8 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private const int BotBrainReadyRetryDelayMs = 250;
     private const int BotBrainReadyMaxAttempts = 40;
     private const int NavHeartbeatIntervalMs = 5000;
+    private const int LiveUpdateSignalPollIntervalMs = 1000;
+    private const string LiveUpdateSignalFileName = "live-update-warning.txt";
     private const int MinimumAutoCleanupIntervalMs = 10000;
     private const int ArmorPickupSanitizerIntervalMs = 1000;
     private const int DroppedArmorPickupDestroyDelayMs = 1;
@@ -209,6 +213,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private readonly Dust2MapService _dust2MapService = new();
     private readonly FacilityNavMeshService _facilityNavMeshService = new();
     private readonly BombModeService _bombModeService = new();
+    private readonly PlaytimeTrackerService _playtimeTrackerService = new();
     private readonly List<PrimitiveObjectToyWrapper> _runtimeNavMeshDebugEdges = new();
     private readonly Dictionary<int, PrimitiveObjectToyWrapper> _navAgentDebugToys = new();
     private int _botSequence;
@@ -234,6 +239,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         WarmupLocalization.SetLanguage(Config.Language);
         ApplyDifficultyPreset(Config.DifficultyPreset, persist: false);
         ApplyNativeSpawnProtectionConfig();
+        _playtimeTrackerService.Enable(Config.PlaytimeTracking);
         ServerEvents.WaitingForPlayers += OnWaitingForPlayers;
         ServerEvents.RoundStarted += OnRoundStarted;
         ServerEvents.RoundRestarted += OnRoundRestarted;
@@ -259,6 +265,13 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         ServerSpecificSettingsSync.ServerOnSettingValueReceived += OnServerSpecificSettingValueReceived;
         _originalServerSpecificSettings = ServerSpecificSettingsSync.DefinedSettings;
         RefreshPlayerPanelSettings(sendToPlayers: false);
+        foreach (Player player in Player.ReadyList.Where(IsManagedHuman))
+        {
+            _playtimeTrackerService.PlayerJoined(player, Config.PlaytimeTracking);
+        }
+
+        SchedulePlaytimeFlush();
+        ScheduleLiveUpdateSignalPoll();
         ApiLogger.Info($"[{Name}] Enabled.");
     }
 
@@ -271,6 +284,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
         _warmupGeneration++;
         _warmupActive = false;
+        _playtimeTrackerService.Disable();
         CleanupManagedBots();
         _bombModeService.ResetRuntime();
         CleanupArenaMap(returnHumansToFacility: true);
@@ -348,6 +362,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private void OnPlayerJoined(PlayerJoinedEventArgs ev)
     {
         RefreshPlayerPanelSettings(sendToPlayers: true);
+        _playtimeTrackerService.PlayerJoined(ev.Player, Config.PlaytimeTracking);
 
         if (Config.ForceRoundStartOnFirstPlayer && IsManagedHuman(ev.Player) && !Round.IsRoundStarted)
         {
@@ -500,6 +515,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     private void OnPlayerLeft(PlayerLeftEventArgs ev)
     {
+        _playtimeTrackerService.PlayerLeft(ev.Player, Config.PlaytimeTracking);
         _selectedHumanLoadouts.Remove(ev.Player.PlayerId);
         _playerBotCountCooldownUntilMs.Remove(ev.Player.PlayerId);
         _playerPanelCooldownUntilMs.Remove(ev.Player.PlayerId);
@@ -2805,6 +2821,96 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         });
     }
 
+    private void SchedulePlaytimeFlush()
+    {
+        int delayMs = Math.Max(10, Config.PlaytimeTracking.FlushIntervalSeconds) * 1000;
+        Schedule(RunPlaytimeFlush, delayMs);
+    }
+
+    private void RunPlaytimeFlush()
+    {
+        if (!ReferenceEquals(Instance, this))
+        {
+            return;
+        }
+
+        _playtimeTrackerService.FlushIfDue(Config.PlaytimeTracking);
+        SchedulePlaytimeFlush();
+    }
+
+    private void ScheduleLiveUpdateSignalPoll()
+    {
+        Schedule(RunLiveUpdateSignalPoll, LiveUpdateSignalPollIntervalMs);
+    }
+
+    private void RunLiveUpdateSignalPoll()
+    {
+        if (!ReferenceEquals(Instance, this))
+        {
+            return;
+        }
+
+        TryProcessLiveUpdateSignal();
+        ScheduleLiveUpdateSignalPoll();
+    }
+
+    private void TryProcessLiveUpdateSignal()
+    {
+        foreach (string signalPath in GetLiveUpdateSignalPaths())
+        {
+            if (!File.Exists(signalPath))
+            {
+                continue;
+            }
+
+            try
+            {
+                string[] lines = File.ReadAllLines(signalPath, Encoding.UTF8);
+                File.Delete(signalPath);
+
+                int seconds = 30;
+                if (lines.Length > 0 && int.TryParse(lines[0].Trim(), out int parsedSeconds))
+                {
+                    seconds = Math.Max(1, parsedSeconds);
+                }
+
+                string message = lines.Length > 1
+                    ? string.Join(" ", lines.Skip(1).Where(line => !string.IsNullOrWhiteSpace(line))).Trim()
+                    : "";
+                BroadcastLiveUpdateWarning(seconds, message, out _);
+            }
+            catch (Exception exception)
+            {
+                ApiLogger.Warn($"[{Name}] Failed to process live update signal '{signalPath}': {exception.Message}");
+            }
+        }
+    }
+
+    private static IEnumerable<string> GetLiveUpdateSignalPaths()
+    {
+        string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        if (string.IsNullOrWhiteSpace(appData))
+        {
+            yield break;
+        }
+
+        string labApiConfigRoot = Path.Combine(appData, "SCP Secret Laboratory", "LabAPI", "configs");
+        if (!Directory.Exists(labApiConfigRoot))
+        {
+            yield break;
+        }
+
+        foreach (string portDirectory in Directory.GetDirectories(labApiConfigRoot))
+        {
+            yield return Path.Combine(portDirectory, "WarmupSandbox", LiveUpdateSignalFileName);
+        }
+    }
+
+    public string BuildPlaytimeReport(int limit = 10)
+    {
+        return _playtimeTrackerService.BuildReport(limit);
+    }
+
     private void ScheduleAutoCleanup(int generation)
     {
         if (!Config.AutoCleanupEnabled || Config.AutoCleanupIntervalSeconds <= 0)
@@ -3569,6 +3675,32 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         return true;
     }
 
+    public bool BroadcastLiveUpdateWarning(int seconds, string message, out string response)
+    {
+        int duration = Math.Max(1, seconds);
+        string finalMessage = string.IsNullOrWhiteSpace(message)
+            ? $"服务器将在 {duration} 秒后重启更新。更新完成后可重新连接，感谢理解。"
+            : message.Trim();
+        string broadcastText = $"<size=28><color=#ffff00>{finalMessage}</color></size>";
+        ushort broadcastDuration = (ushort)Math.Min(ushort.MaxValue, Math.Max(5, duration));
+        int sent = 0;
+
+        foreach (Player player in Player.List)
+        {
+            if (player == null || player.IsDestroyed || player.IsHost)
+            {
+                continue;
+            }
+
+            player.SendBroadcast(broadcastText, broadcastDuration, global::Broadcast.BroadcastFlags.Normal, true);
+            sent++;
+        }
+
+        response = $"Live update restart warning sent to {sent} player(s).";
+        ApiLogger.Info($"[{Name}] {response} seconds={duration} message={finalMessage}");
+        return true;
+    }
+
     public bool TryPlayerSetBotCount(Player player, string value, out string response)
     {
         if (!int.TryParse(value, out int botCount) || botCount < 0)
@@ -4052,13 +4184,16 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
 
         int targetId = GetSelectedPanelBotTargetId(actor);
-
-        List<Player> targets = new();
         if (targetId == PlayerPanelAllBotsTargetId)
         {
-            targets.AddRange(GetPlayerPanelBotTargets());
+            response = WarmupLocalization.T(
+                "Choose one bot target before applying a bot role.",
+                "应用机器人阵营前请选择单个机器人目标。");
+            return false;
         }
-        else if (TryGetPlayerPanelTargetById(targetId, out Player target)
+
+        List<Player> targets = new();
+        if (TryGetPlayerPanelTargetById(targetId, out Player target)
             && target != null
             && IsManagedBot(target))
         {

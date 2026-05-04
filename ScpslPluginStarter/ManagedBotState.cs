@@ -156,6 +156,8 @@ internal sealed class ManagedBotState
 
     public int LastDirectNavigationMoveTick { get; set; }
 
+    public int LastOutOfBoundsRecoveryTick { get; set; }
+
     public bool HasDirectNavigationSafePosition { get; set; }
 
     public UnityEngine.Vector3 LastDirectNavigationSafePosition { get; set; }
@@ -195,6 +197,7 @@ internal sealed class ManagedBotState
         LastRelevantDoorTick = 0;
         LastLongRangeRoomTeleportTick = 0;
         LastDirectNavigationMoveTick = 0;
+        LastOutOfBoundsRecoveryTick = 0;
         HasDirectNavigationSafePosition = false;
         LastDirectNavigationSafePosition = default;
         LastMoveUsedNavigation = false;

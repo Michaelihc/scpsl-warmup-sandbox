@@ -17,6 +17,8 @@ internal sealed class BotControllerService
     private const int RelevantDoorCacheMs = 1500;
     private const int SustainedStuckRoomTeleportMs = 10000;
     private const int SustainedStuckRoomTeleportCooldownMs = 10000;
+    private const int OutOfBoundsRecoveryCooldownMs = 1000;
+    private const float OutOfBoundsLastSafeVerticalDrop = 8.0f;
     private const float ElevatedPropForwardTeleportDistance = 1.35f;
     private const float ChaseStrafeBias = 0.6f;
     private const float ReactiveChaseStrafeBias = 1.05f;
@@ -88,10 +90,12 @@ internal sealed class BotControllerService
         int brainToken,
         int generation)
     {
+        int nowTick = Environment.TickCount;
+        TryRecoverOutOfBoundsPosition(bot, state, behavior, useDust2Arena, nowTick, logNavDebug);
+
         FirearmItem? firearm = _combatService.EnsureFirearmEquipped(bot);
         bool canUseScpAttack = BotCombatService.IsSupportedScpAttacker(bot.Role);
         BotTargetSelection? target = _targetingService.SelectTarget(bot, state, players, behavior, random);
-        int nowTick = Environment.TickCount;
         bool shouldCloseRetreat = UpdateCloseRetreatState(bot, state, target, behavior, canUseScpAttack);
         bool closeRetreatLockActive = IsCloseRetreatLockActive(state, nowTick) || shouldCloseRetreat;
         if (shouldCloseRetreat)
@@ -848,6 +852,82 @@ internal sealed class BotControllerService
             bot,
             state,
             $"direct-nav-recover reason={(hasCurrentSample ? "vertical-drift" : "off-navmesh")} pos=({botPosition.x:F1},{botPosition.y:F1},{botPosition.z:F1}) safe=({safePosition.x:F1},{safePosition.y:F1},{safePosition.z:F1})");
+    }
+
+    private bool TryRecoverOutOfBoundsPosition(
+        Player bot,
+        ManagedBotState state,
+        BotBehaviorDefinition behavior,
+        bool useDust2Arena,
+        int nowTick,
+        Action<Player, ManagedBotState, string> logNavDebug)
+    {
+        Vector3 botPosition = bot.Position;
+        bool outOfBounds = IsOutOfNavigationBounds(botPosition, behavior, out NavMeshHit currentNavHit);
+        if (!outOfBounds
+            && state.HasDirectNavigationSafePosition
+            && botPosition.y < state.LastDirectNavigationSafePosition.y - OutOfBoundsLastSafeVerticalDrop)
+        {
+            outOfBounds = true;
+        }
+
+        if (!outOfBounds)
+        {
+            state.HasDirectNavigationSafePosition = true;
+            state.LastDirectNavigationSafePosition = currentNavHit.position;
+            return false;
+        }
+
+        if (unchecked(nowTick - state.LastOutOfBoundsRecoveryTick) < OutOfBoundsRecoveryCooldownMs)
+        {
+            return false;
+        }
+
+        state.LastOutOfBoundsRecoveryTick = nowTick;
+        Vector3 anchor = state.HasDirectNavigationSafePosition
+            ? state.LastDirectNavigationSafePosition
+            : currentNavHit.position;
+
+        if (!useDust2Arena
+            && TryTeleportToFallbackRoom(bot, state, behavior, logNavDebug, nowTick, "out-of-bounds", anchor))
+        {
+            ResetOutOfBoundsMovementState(bot, state);
+            return true;
+        }
+
+        if (state.HasDirectNavigationSafePosition
+            && IsSafeTeleportFloor(state.LastDirectNavigationSafePosition, behavior)
+            && !IsTeleportBodyBlocked(state.LastDirectNavigationSafePosition, behavior))
+        {
+            Vector3 safePosition = state.LastDirectNavigationSafePosition;
+            bot.Position = ApplyDirectNavPlayerOffset(safePosition, behavior);
+            state.LastDirectNavigationMoveTick = nowTick;
+            state.LastMoveIntentLabel = "out-of-bounds-safe-teleport";
+            state.LastMoveIntentTick = nowTick;
+            TryResetPathAfterTeleport(state, safePosition);
+            ResetOutOfBoundsMovementState(bot, state);
+            logNavDebug(
+                bot,
+                state,
+                $"out-of-bounds-safe-teleport from=({botPosition.x:F1},{botPosition.y:F1},{botPosition.z:F1}) safe=({safePosition.x:F1},{safePosition.y:F1},{safePosition.z:F1})");
+            return true;
+        }
+
+        logNavDebug(
+            bot,
+            state,
+            $"out-of-bounds-recovery-failed pos=({botPosition.x:F1},{botPosition.y:F1},{botPosition.z:F1}) anchor=({anchor.x:F1},{anchor.y:F1},{anchor.z:F1}) hasSafe={state.HasDirectNavigationSafePosition}");
+        return false;
+    }
+
+    private static void ResetOutOfBoundsMovementState(Player bot, ManagedBotState state)
+    {
+        state.StuckTicks = 0;
+        state.ForwardStallSinceTick = 0;
+        state.NavigationStuckRecoveryCount = 0;
+        state.NavMeshStuckNudgeLoopCount = 0;
+        state.LastNavMeshStuckNudgeTick = 0;
+        state.LastPosition = bot.Position;
     }
 
     private bool TryApplyDirectNavMeshPositionControl(
@@ -2443,9 +2523,14 @@ internal sealed class BotControllerService
             return false;
         }
 
-        bool hasZone = TryGetClosestRoomZone(anchor, out FacilityZone zone)
-            && zone != FacilityZone.None
-            && zone != FacilityZone.Surface;
+        bool knowsAnchorZone = TryGetClosestRoomZone(anchor, out FacilityZone zone);
+        if (knowsAnchorZone && zone == FacilityZone.Surface)
+        {
+            return false;
+        }
+
+        bool hasZone = knowsAnchorZone
+            && zone != FacilityZone.None;
         List<(RoomIdentifier Room, Vector3 NavPosition)> candidates = CollectSafeRoomTeleportCandidates(
             behavior,
             hasZone ? zone : FacilityZone.None);

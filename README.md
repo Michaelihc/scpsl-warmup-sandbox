@@ -135,6 +135,26 @@ Live config usually lives at:
 
 Copy `ScpslPluginStarter\config.yml` there if LabAPI has not generated one yet.
 
+## Live Update Helper
+
+Use the live deploy helper only when you intend to update the public server. It builds the plugin, uploads the DLL to a staging path, broadcasts a Chinese update warning, waits 30 seconds, installs the DLL, and restarts LocalAdmin:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\deploy-live.ps1
+```
+
+Preview the commands without uploading or restarting:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\deploy-live.ps1 -DryRun
+```
+
+Default restart warning:
+
+```text
+服务器将在 30 秒后重启更新。更新完成后可重新连接，感谢理解。
+```
+
 ## Runtime Commands
 
 Commands are registered for Remote Admin and game console where supported.

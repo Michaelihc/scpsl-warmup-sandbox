@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using CommandSystem;
 using LabApi.Features.Wrappers;
 using ICommand = CommandSystem.ICommand;
@@ -46,6 +47,19 @@ public sealed class WarmupCommand : ICommand
                 response = plugin.BuildStatus();
                 return true;
 
+            case "playtime":
+                int limit = 10;
+                if (arguments.Count >= 2 && (!int.TryParse(GetArgument(arguments, 1), out limit) || limit <= 0))
+                {
+                    response = WarmupLocalization.T(
+                        "Usage: bots playtime [limit]",
+                        "用法：bots playtime [数量]");
+                    return false;
+                }
+
+                response = plugin.BuildPlaytimeReport(limit);
+                return true;
+
             case "start":
                 return plugin.StartRoundIfNeeded(out response);
 
@@ -60,6 +74,10 @@ public sealed class WarmupCommand : ICommand
 
             case "save":
                 return plugin.SaveCurrentConfig(out response);
+
+            case "updatewarning":
+            case "updaterestart":
+                return BroadcastLiveUpdateWarning(plugin, arguments, out response);
 
             case "setcount":
                 if (arguments.Count < 2)
@@ -238,6 +256,30 @@ public sealed class WarmupCommand : ICommand
         return UpdateSettingAndSave(plugin, "retreatspeed", GetArgument(arguments, 1), out response);
     }
 
+    private static bool BroadcastLiveUpdateWarning(WarmupSandboxPlugin plugin, ArraySegment<string> arguments, out string response)
+    {
+        int seconds = 30;
+        int messageStartIndex = 1;
+        if (arguments.Count >= 2 && int.TryParse(GetArgument(arguments, 1), out int parsedSeconds))
+        {
+            seconds = Math.Max(1, parsedSeconds);
+            messageStartIndex = 2;
+        }
+
+        string message = JoinArguments(arguments, messageStartIndex);
+        return plugin.BroadcastLiveUpdateWarning(seconds, message, out response);
+    }
+
+    private static string JoinArguments(ArraySegment<string> arguments, int startIndex)
+    {
+        if (arguments.Array == null || startIndex >= arguments.Count)
+        {
+            return string.Empty;
+        }
+
+        return string.Join(" ", arguments.Array.Skip(arguments.Offset + startIndex).Take(arguments.Count - startIndex));
+    }
+
     private static bool UpdateSettingAndSave(WarmupSandboxPlugin plugin, string key, string value, out string response)
     {
         if (!plugin.UpdateSetting(key, value, out response))
@@ -307,8 +349,8 @@ public sealed class WarmupCommand : ICommand
     private static string BuildHelp()
     {
         return WarmupLocalization.T(
-            "bots status | start | restart | roundrestart | stop | save | set <count> | setcount <count> | set939speed <speed> | set3114speed <speed> | set049speed <speed> | set106speed <speed> | setspeed <speed> | setretreatspeed <scale> | map <bomb|standard|true|false> | difficulty <easy|normal|hard|hardest> | aimode <classic|realistic> | language <en|cn> | set retreatspeed <scale> | set <key> <value>",
-            "bots status | start | restart | roundrestart | stop | save | set <数量> | setcount <数量> | set939speed <速度> | set3114speed <速度> | set049speed <速度> | set106speed <速度> | setspeed <速度> | setretreatspeed <倍率> | map <bomb|standard|true|false> | difficulty <easy|normal|hard|hardest> | aimode <classic|realistic> | language <en|cn> | set retreatspeed <倍率> | set <键> <值>");
+            "bots status | playtime [limit] | updatewarning [seconds] [message] | start | restart | roundrestart | stop | save | set <count> | setcount <count> | set939speed <speed> | set3114speed <speed> | set049speed <speed> | set106speed <speed> | setspeed <speed> | setretreatspeed <scale> | map <bomb|standard|true|false> | difficulty <easy|normal|hard|hardest> | aimode <classic|realistic> | language <en|cn> | set retreatspeed <scale> | set <key> <value>",
+            "bots status | playtime [limit] | updatewarning [秒数] [消息] | start | restart | roundrestart | stop | save | set <数量> | setcount <数量> | set939speed <速度> | set3114speed <速度> | set049speed <速度> | set106speed <速度> | setspeed <速度> | setretreatspeed <倍率> | map <bomb|standard|true|false> | difficulty <easy|normal|hard|hardest> | aimode <classic|realistic> | language <en|cn> | set retreatspeed <倍率> | set <键> <值>");
     }
 
     private static string BuildPlayerHelp()

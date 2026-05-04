@@ -3,6 +3,11 @@ param(
     [int]$Port = 7777,
     [int]$IntervalSeconds = 10,
     [int]$TimeoutMs = 2000,
+    [switch]$ViaAliyun,
+    [string]$AliyunRegion = "cn-beijing",
+    [string]$AliyunInstanceId = "i-2zedap60ew87d8n8ir39",
+    [string]$RemoteHostName = "127.0.0.1",
+    [int]$RemotePort = 0,
     [switch]$Once
 )
 
@@ -135,12 +140,180 @@ function Get-ServerInfo {
     }
 }
 
-Write-Host "Watching SCP:SL player count at ${HostName}:$Port. Press Ctrl+C to stop."
+function Invoke-AliyunShellScript {
+    param(
+        [string]$Region,
+        [string]$InstanceId,
+        [string]$Script,
+        [int]$TimeoutSeconds
+    )
+
+    $content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Script))
+    $run = aliyun ecs RunCommand `
+        --RegionId $Region `
+        --Type RunShellScript `
+        --InstanceId.1 $InstanceId `
+        --Timeout $TimeoutSeconds `
+        --KeepCommand false `
+        --ContentEncoding Base64 `
+        --CommandContent $content | ConvertFrom-Json
+
+    $deadline = (Get-Date).AddSeconds([Math]::Max(10, $TimeoutSeconds + 10))
+    do {
+        Start-Sleep -Seconds 2
+        $result = aliyun ecs DescribeInvocationResults --RegionId $Region --InvokeId $run.InvokeId | ConvertFrom-Json
+        $invocation = $result.Invocation.InvocationResults.InvocationResult[0]
+        if ($invocation.InvocationStatus -in @("Success", "Failed", "Stopped", "Timeout")) {
+            if ($invocation.Output) {
+                $decoded = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($invocation.Output))
+            } else {
+                $decoded = ""
+            }
+
+            if ($invocation.InvocationStatus -ne "Success" -or $invocation.ExitCode -ne 0) {
+                throw "Aliyun command failed with status $($invocation.InvocationStatus), exit $($invocation.ExitCode): $decoded"
+            }
+
+            return $decoded
+        }
+    } while ((Get-Date) -lt $deadline)
+
+    throw "Aliyun command did not finish before the local timeout."
+}
+
+function Get-ServerInfoViaAliyun {
+    param(
+        [string]$Region,
+        [string]$InstanceId,
+        [string]$RemoteHostName,
+        [int]$RemotePort,
+        [int]$TimeoutMs
+    )
+
+    $remoteTimeout = [Math]::Max(1, [Math]::Ceiling($TimeoutMs / 1000.0))
+    $escapedHost = $RemoteHostName.Replace("'", "'\''")
+    $script = @"
+python3 - <<'PY'
+import json
+import socket
+import struct
+
+host = '$escapedHost'
+port = $RemotePort
+timeout = $remoteTimeout
+
+def query():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    packet = b'\xff\xff\xff\xffTSource Engine Query\x00'
+    try:
+        sock.sendto(packet, (host, port))
+        data, _ = sock.recvfrom(4096)
+        if len(data) >= 9 and data[4] == 0x41:
+            sock.sendto(packet + data[5:9], (host, port))
+            data, _ = sock.recvfrom(4096)
+
+        if len(data) < 6 or data[4] != 0x49:
+            return {
+                'ok': False,
+                'error': 'Unexpected A2S_INFO response type: ' + (hex(data[4]) if len(data) > 4 else 'none')
+            }
+
+        offset = 6
+        def read_string():
+            nonlocal offset
+            end = data.find(b'\x00', offset)
+            if end < 0:
+                end = len(data)
+            value = data[offset:end].decode('utf-8', 'replace')
+            offset = end + 1
+            return value
+
+        name = read_string()
+        game_map = read_string()
+        folder = read_string()
+        game = read_string()
+        if offset + 6 > len(data):
+            return {'ok': False, 'error': 'A2S_INFO response was truncated.'}
+
+        app_id = struct.unpack_from('<H', data, offset)[0]
+        offset += 2
+        players = data[offset]
+        max_players = data[offset + 1]
+        bots = data[offset + 2]
+        server_type = chr(data[offset + 3])
+        environment = chr(data[offset + 4])
+        return {
+            'ok': True,
+            'name': name,
+            'map': game_map,
+            'folder': folder,
+            'game': game,
+            'appId': app_id,
+            'players': players,
+            'maxPlayers': max_players,
+            'bots': bots,
+            'serverType': server_type,
+            'environment': environment
+        }
+    except Exception as exc:
+        return {'ok': False, 'error': type(exc).__name__ + ': ' + str(exc)}
+    finally:
+        sock.close()
+
+print(json.dumps(query(), ensure_ascii=False))
+PY
+"@
+
+    $output = Invoke-AliyunShellScript -Region $Region -InstanceId $InstanceId -Script $script -TimeoutSeconds ([Math]::Max(20, $remoteTimeout + 10))
+    $payload = ($output -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 1) | ConvertFrom-Json
+    if (-not $payload.ok) {
+        throw $payload.error
+    }
+
+    [pscustomobject]@{
+        Name = $payload.name
+        Map = $payload.map
+        Folder = $payload.folder
+        Game = $payload.game
+        AppId = [int]$payload.appId
+        Players = [int]$payload.players
+        MaxPlayers = [int]$payload.maxPlayers
+        Bots = [int]$payload.bots
+        ServerType = [char]$payload.serverType
+        Environment = [char]$payload.environment
+        Endpoint = "$RemoteHostName`:$RemotePort via Aliyun"
+    }
+}
+
+$effectiveRemotePort = if ($RemotePort -gt 0) { $RemotePort } else { $Port }
+$watchTarget = if ($ViaAliyun) {
+    "${HostName}:$Port with Aliyun fallback to ${RemoteHostName}:$effectiveRemotePort"
+} else {
+    "${HostName}:$Port"
+}
+
+Write-Host "Watching SCP:SL player count at $watchTarget. Press Ctrl+C to stop."
 
 do {
     $timestamp = Get-Date -Format "HH:mm:ss"
     try {
-        $info = Get-ServerInfo -HostName $HostName -Port $Port -TimeoutMs $TimeoutMs
+        try {
+            $info = Get-ServerInfo -HostName $HostName -Port $Port -TimeoutMs $TimeoutMs
+        }
+        catch {
+            if (-not $ViaAliyun) {
+                throw
+            }
+
+            $info = Get-ServerInfoViaAliyun `
+                -Region $AliyunRegion `
+                -InstanceId $AliyunInstanceId `
+                -RemoteHostName $RemoteHostName `
+                -RemotePort $effectiveRemotePort `
+                -TimeoutMs $TimeoutMs
+        }
+
         Write-Host ("[{0}] {1}/{2} players, {3} bots | {4} | {5}" -f `
             $timestamp,
             $info.Players,

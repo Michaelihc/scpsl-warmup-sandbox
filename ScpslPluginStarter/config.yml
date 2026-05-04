@@ -14,7 +14,7 @@ enable_attachment_logging: false
 enable_arena_logging: false
 enable_zoom_logging: false
 enable_spawn_protection: true
-spawn_protection_duration_ms: 3000
+spawn_protection_duration_ms: 5000
 auto_cleanup_enabled: true
 auto_cleanup_interval_seconds: 10
 auto_cleanup_pickup_threshold: 80
@@ -26,6 +26,23 @@ player_panel_use_window_seconds: 20
 player_panel_global_cooldown_seconds: 60
 player_panel_cooldown_seconds: 180
 player_panel_cooldown_jitter_seconds: 60
+text_chat:
+  enabled: true
+  allow_public_chat: true
+  allow_proximity_chat: true
+  allow_radio_chat: true
+  allow_team_chat: true
+  allow_spectators_chat: true
+  allow_scp_and_human_public_chat: true
+  allow_scp_and_human_proximity_chat: false
+  proximity_chat_distance: 20.0
+  hint_duration_seconds: 10.0
+  max_message_length: 160
+  show_sender_console_response: true
+playtime_tracking:
+  enabled: true
+  data_file_name: playtime.tsv
+  flush_interval_seconds: 60
 bot_count: 6
 max_bot_count: 30
 reset_bot_count_when_no_active_players: true
