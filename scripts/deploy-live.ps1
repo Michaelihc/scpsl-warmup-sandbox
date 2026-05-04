@@ -9,6 +9,7 @@ param(
     [string]$RemoteServerDir = "/home/scpsl/scpsl-server",
     [string]$RemotePluginDir = "/home/scpsl/.config/SCP Secret Laboratory/LabAPI/plugins/global",
     [string]$RemoteConfigDir = "/home/scpsl/.config/SCP Secret Laboratory/LabAPI/configs/7777/WarmupSandbox",
+    [string]$RemoteServiceName = "scpsl-warmup.service",
     [switch]$SkipBuild,
     [switch]$DryRun
 )
@@ -72,6 +73,7 @@ REMOTE_PLUGIN_DIR="$(printf '%s' "$6" | base64 -d)"
 REMOTE_CONFIG_DIR="$(printf '%s' "$7" | base64 -d)"
 REMOTE_TEMP_DLL="$8"
 DRY_RUN="$9"
+REMOTE_SERVICE_NAME="${10:-}"
 
 plugin_path="$REMOTE_PLUGIN_DIR/ScpslPluginStarter.dll"
 signal_path="$REMOTE_CONFIG_DIR/live-update-warning.txt"
@@ -154,6 +156,38 @@ send_localadmin_command() {
     send_localadmin_tcp_command "$command"
 }
 
+systemd_service_exists() {
+    [ -n "$REMOTE_SERVICE_NAME" ] \
+        && command -v systemctl >/dev/null 2>&1 \
+        && systemctl cat "$REMOTE_SERVICE_NAME" >/dev/null 2>&1
+}
+
+stop_existing_server() {
+    if systemd_service_exists; then
+        echo "Stopping systemd service $REMOTE_SERVICE_NAME..."
+        systemctl stop "$REMOTE_SERVICE_NAME" || true
+    fi
+
+    pkill -TERM -u "$REMOTE_RUN_USER" -f "SCPSL.x86_64" 2>/dev/null || true
+    pkill -TERM -u "$REMOTE_RUN_USER" -f "LocalAdmin" 2>/dev/null || true
+    sleep 5
+    pkill -KILL -u "$REMOTE_RUN_USER" -f "SCPSL.x86_64" 2>/dev/null || true
+    pkill -KILL -u "$REMOTE_RUN_USER" -f "LocalAdmin" 2>/dev/null || true
+}
+
+start_server() {
+    if systemd_service_exists; then
+        echo "Starting systemd service $REMOTE_SERVICE_NAME..."
+        systemctl start "$REMOTE_SERVICE_NAME"
+        echo "Live restart requested through systemd service $REMOTE_SERVICE_NAME."
+        return 0
+    fi
+
+    echo "Systemd service not found; falling back to detached LocalAdmin start."
+    runuser -u "$REMOTE_RUN_USER" -- bash -lc "cd '$REMOTE_SERVER_DIR' && setsid -f ./LocalAdmin '$PORT' >> '$REMOTE_SERVER_DIR/localadmin-live-update.log' 2>&1 < /dev/null"
+    echo "Live restart requested. LocalAdmin log: $REMOTE_SERVER_DIR/localadmin-live-update.log"
+}
+
 echo "Sending Chinese restart warning: $WARNING_MESSAGE"
 if [ "$DRY_RUN" = "1" ]; then
     printf '[dry-run] would write update signal: %s\n' "$signal_path"
@@ -181,19 +215,17 @@ fi
 
 echo "Restarting SCP:SL LocalAdmin..."
 if [ "$DRY_RUN" = "1" ]; then
-    echo "[dry-run] would terminate LocalAdmin and SCPSL.x86_64, then start LocalAdmin $PORT"
+    if systemd_service_exists; then
+        echo "[dry-run] would stop stray LocalAdmin/SCPSL processes and restart systemd service $REMOTE_SERVICE_NAME"
+    else
+        echo "[dry-run] would terminate LocalAdmin and SCPSL.x86_64, then start LocalAdmin $PORT"
+    fi
     exit 0
 fi
 
-pkill -TERM -u "$REMOTE_RUN_USER" -f "SCPSL.x86_64" 2>/dev/null || true
-pkill -TERM -u "$REMOTE_RUN_USER" -f "LocalAdmin" 2>/dev/null || true
-sleep 5
-pkill -KILL -u "$REMOTE_RUN_USER" -f "SCPSL.x86_64" 2>/dev/null || true
-pkill -KILL -u "$REMOTE_RUN_USER" -f "LocalAdmin" 2>/dev/null || true
-
-runuser -u "$REMOTE_RUN_USER" -- bash -lc "cd '$REMOTE_SERVER_DIR' && setsid -f ./LocalAdmin '$PORT' >> '$REMOTE_SERVER_DIR/localadmin-live-update.log' 2>&1 < /dev/null"
-echo "Live restart requested. LocalAdmin log: $REMOTE_SERVER_DIR/localadmin-live-update.log"
+stop_existing_server
+start_server
 '@
 
 $dryRunValue = if ($DryRun) { "1" } else { "0" }
-$remoteScript | ssh @sshArgs bash -s -- $Port $WarningSeconds $warningMessageBase64 $RemoteRunUser $remoteServerDirBase64 $remotePluginDirBase64 $remoteConfigDirBase64 $remoteTempDll $dryRunValue
+$remoteScript | ssh @sshArgs bash -s -- $Port $WarningSeconds $warningMessageBase64 $RemoteRunUser $remoteServerDirBase64 $remotePluginDirBase64 $remoteConfigDirBase64 $remoteTempDll $dryRunValue $RemoteServiceName
