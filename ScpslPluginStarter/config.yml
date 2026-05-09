@@ -1,6 +1,6 @@
 auto_start_on_waiting_for_players: false
 auto_start_on_first_player: false
-auto_start_on_round_started: true
+auto_start_on_round_started: false
 force_round_start_on_first_player: false
 suppress_round_end: false
 disable_warhead: false

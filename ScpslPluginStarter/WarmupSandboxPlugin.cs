@@ -527,18 +527,6 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         RefreshPlayerPanelSettings(sendToPlayers: true);
         _playtimeTrackerService.PlayerJoined(ev.Player, Config.PlaytimeTracking);
 
-        if (Config.ForceRoundStartOnFirstPlayer && IsManagedHuman(ev.Player) && !Round.IsRoundStarted)
-        {
-            int generation = _warmupGeneration;
-            Schedule(() =>
-            {
-                if (IsCurrentGeneration(generation) && !Round.IsRoundStarted && Player.List.Any(IsManagedHuman))
-                {
-                    Round.Start();
-                }
-            }, Config.JoinSetupDelayMs);
-        }
-
         if (!_warmupActive && Config.AutoStartOnFirstPlayer && IsManagedHuman(ev.Player))
         {
             int generation = _warmupGeneration;
@@ -592,7 +580,8 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                 botState.RespawnRole = ev.Player.Role;
             }
 
-            RemoveManagedBot(ev.Player.PlayerId);
+            CancelBotBrainForRound(ev.Player.PlayerId);
+            RefreshPlayerPanelSettings(sendToPlayers: true);
             return;
         }
     }
@@ -926,6 +915,27 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         Schedule(() => SetupWarmup(generation), Config.InitialSetupDelayMs);
     }
 
+    private int EnsureBotRuntimeActive(string reason)
+    {
+        if (_warmupActive)
+        {
+            return _warmupGeneration;
+        }
+
+        _warmupGeneration++;
+        _warmupActive = true;
+        int generation = _warmupGeneration;
+        ApiLogger.Info($"[{Name}] Starting bot runtime ({reason}).");
+        ScheduleNavHeartbeat(generation);
+        ScheduleAutoCleanup(generation);
+        ScheduleArmorPickupSanitizer(generation);
+        ScheduleHelpReminderBroadcast(generation);
+        PrepareArenaMapForWarmup();
+        PrepareFacilityNavMeshForWarmup();
+        CleanupArmorPickups();
+        return generation;
+    }
+
     private void SetupWarmup(int generation)
     {
         if (!IsCurrentGeneration(generation))
@@ -1090,6 +1100,38 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         _managedBots[bot.PlayerId] = state;
         RefreshPlayerPanelSettings(sendToPlayers: true);
         Schedule(() => ActivateSpawnedBot(bot.PlayerId, generation), Config.BotRoleAssignDelayMs);
+    }
+
+    public bool AddBots(int count, out string response)
+    {
+        if (count <= 0)
+        {
+            response = "Bot add count must be greater than zero.";
+            return false;
+        }
+
+        int baselineCount = Math.Max(Config.BotCount, _managedBots.Count);
+        int maxCount = Math.Max(0, Config.MaxBotCount);
+        int available = Math.Max(0, maxCount - baselineCount);
+        if (available <= 0)
+        {
+            response = $"Cannot add bots because max bot count is {maxCount}.";
+            return false;
+        }
+
+        int addCount = Math.Min(count, available);
+        int generation = EnsureBotRuntimeActive("remote admin add bot");
+        Config.BotCount = baselineCount + addCount;
+        for (int i = 0; i < addCount; i++)
+        {
+            SpawnBot(generation);
+        }
+
+        SaveConfig();
+        response = addCount == count
+            ? $"Added {addCount} bot(s). Managed bots now {_managedBots.Count}/{Config.BotCount}."
+            : $"Added {addCount} bot(s); max bot count {maxCount} reached. Managed bots now {_managedBots.Count}/{Config.BotCount}.";
+        return true;
     }
 
     private void ActivateSpawnedBot(int playerId, int generation)
@@ -4351,36 +4393,22 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     public bool StartRoundIfNeeded(out string response)
     {
-        if (Round.IsRoundStarted)
-        {
-            response = "Round is already started.";
-            return true;
-        }
-
-        Round.Start();
-        response = "Round start requested.";
+        EnsureBotRuntimeActive("remote admin start");
+        response = "Bot runtime start requested. Round control is disabled on this branch.";
         return true;
     }
 
     public bool RestartWarmupFromCommand(bool ensureRoundStarted, out string response)
     {
-        if (ensureRoundStarted && !Round.IsRoundStarted)
-        {
-            Round.Start();
-            response = "Round start requested. Warmup will begin when the round starts.";
-            return true;
-        }
-
         RestartWarmup("remote admin");
-        response = "Warmup restart requested.";
+        response = "Bot runtime restart requested. Round control is disabled on this branch.";
         return true;
     }
 
     public bool RestartRound(out string response)
     {
-        Round.RestartSilently();
-        response = "Silent round restart requested.";
-        return true;
+        response = "Round restart is disabled on this bot-only branch.";
+        return false;
     }
 
     public bool StopWarmup(out string response)
@@ -4522,7 +4550,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
 
         Config.BotCount = botCount;
-        EnsureBotPopulation(_warmupGeneration);
+        EnsureBotPopulation(EnsureBotRuntimeActive("player bot count"));
         TrimExcessBots();
         SaveConfig();
 
@@ -4848,7 +4876,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                     : Config.BotCount;
                 Config.BotCount = ClampPanelBotCount(count);
                 SaveConfig();
-                EnsureBotPopulation(_warmupGeneration);
+                EnsureBotPopulation(EnsureBotRuntimeActive("player panel bot count"));
                 response = WarmupLocalization.T(
                     $"Bot count set to {Config.BotCount}.",
                     $"机器人数量已设置为 {Config.BotCount}。");
@@ -5508,7 +5536,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                 }
 
                 Config.BotCount = botCount;
-                EnsureBotPopulation(_warmupGeneration);
+                EnsureBotPopulation(EnsureBotRuntimeActive("remote admin bot count"));
                 TrimExcessBots();
                 response = $"Bot count set to {Config.BotCount}.";
                 return true;

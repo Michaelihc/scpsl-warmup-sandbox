@@ -64,7 +64,7 @@ public sealed class WarmupCommand : ICommand
                 return plugin.StartRoundIfNeeded(out response);
 
             case "restart":
-                return plugin.RestartWarmupFromCommand(ensureRoundStarted: true, out response);
+                return plugin.RestartWarmupFromCommand(ensureRoundStarted: false, out response);
 
             case "roundrestart":
                 return plugin.RestartRound(out response);
@@ -95,6 +95,13 @@ public sealed class WarmupCommand : ICommand
                 }
 
                 return UpdateSettingAndSave(plugin, "bots", GetArgument(arguments, 1), out response);
+
+            case "add":
+            case "addbot":
+            case "addbots":
+            case "spawnbot":
+            case "spawnbots":
+                return AddBots(plugin, arguments, out response);
 
             case "set939speed":
                 return UpdateSpeedAndSave(plugin, "939speed", arguments, out response);
@@ -262,6 +269,29 @@ public sealed class WarmupCommand : ICommand
         return UpdateSettingAndSave(plugin, "retreatspeed", GetArgument(arguments, 1), out response);
     }
 
+    private static bool AddBots(WarmupSandboxPlugin plugin, ArraySegment<string> arguments, out string response)
+    {
+        int countIndex = 1;
+        if (arguments.Count >= 2
+            && (GetArgument(arguments, 1).Equals("bot", StringComparison.OrdinalIgnoreCase)
+                || GetArgument(arguments, 1).Equals("bots", StringComparison.OrdinalIgnoreCase)))
+        {
+            countIndex = 2;
+        }
+
+        int count = 1;
+        if (arguments.Count > countIndex
+            && (!int.TryParse(GetArgument(arguments, countIndex), out count) || count <= 0))
+        {
+            response = WarmupLocalization.T(
+                "Usage: bots add [bot|bots] [count]",
+                "用法：bots add [bot|bots] [数量]");
+            return false;
+        }
+
+        return plugin.AddBots(count, out response);
+    }
+
     private static bool BroadcastLiveUpdateWarning(WarmupSandboxPlugin plugin, ArraySegment<string> arguments, out string response)
     {
         int seconds = 30;
@@ -355,8 +385,8 @@ public sealed class WarmupCommand : ICommand
     private static string BuildHelp()
     {
         return WarmupLocalization.T(
-            "bots status | playtime [limit] | updatewarning [seconds] [message] | start | restart | roundrestart | stop | save | reloadconfig | set <count> | setcount <count> | set maxbots <count> | set maxplayerbots <count> | set939speed <speed> | set3114speed <speed> | set049speed <speed> | set106speed <speed> | setspeed <speed> | setretreatspeed <scale> | map <bomb|standard|true|false> | difficulty <easy|normal|hard|hardest> | aimode <classic|realistic> | language <en|cn> | set retreatspeed <scale> | set <key> <value>",
-            "bots status | playtime [limit] | updatewarning [秒数] [消息] | start | restart | roundrestart | stop | save | reloadconfig | set <数量> | setcount <数量> | set maxbots <数量> | set maxplayerbots <数量> | set939speed <速度> | set3114speed <速度> | set049speed <速度> | set106speed <速度> | setspeed <速度> | setretreatspeed <倍率> | map <bomb|standard|true|false> | difficulty <easy|normal|hard|hardest> | aimode <classic|realistic> | language <en|cn> | set retreatspeed <倍率> | set <键> <值>");
+            "bots status | playtime [limit] | updatewarning [seconds] [message] | start | restart | roundrestart | stop | save | reloadconfig | add [bot|bots] [count] | set <count> | setcount <count> | set maxbots <count> | set maxplayerbots <count> | set939speed <speed> | set3114speed <speed> | set049speed <speed> | set106speed <speed> | setspeed <speed> | setretreatspeed <scale> | map <bomb|standard|true|false> | difficulty <easy|normal|hard|hardest> | aimode <classic|realistic> | language <en|cn> | set retreatspeed <scale> | set <key> <value>",
+            "bots status | playtime [limit] | updatewarning [秒数] [消息] | start | restart | roundrestart | stop | save | reloadconfig | add [bot|bots] [数量] | set <数量> | setcount <数量> | set maxbots <数量> | set maxplayerbots <数量> | set939speed <速度> | set3114speed <速度> | set049speed <速度> | set106speed <速度> | setspeed <速度> | setretreatspeed <倍率> | map <bomb|standard|true|false> | difficulty <easy|normal|hard|hardest> | aimode <classic|realistic> | language <en|cn> | set retreatspeed <倍率> | set <键> <值>");
     }
 
     private static string BuildPlayerHelp()

@@ -11,7 +11,7 @@ public sealed class PluginConfig
 
     public bool AutoStartOnFirstPlayer { get; set; } = false;
 
-    public bool AutoStartOnRoundStarted { get; set; } = true;
+    public bool AutoStartOnRoundStarted { get; set; } = false;
 
     public bool ForceRoundStartOnFirstPlayer { get; set; } = false;
 
