@@ -1,5 +1,7 @@
 using System;
 using System.Linq;
+using InventorySystem.Items;
+using LabApi.Features.Enums;
 using LabApi.Features.Wrappers;
 using PlayerRoles;
 
@@ -7,17 +9,40 @@ namespace ScpslPluginStarter;
 
 internal sealed class BotCombatService
 {
+    private const ushort DefaultCom15ReserveAmmo = 240;
+
+    public static string[] GetItemActionCategoryAliases(ItemType itemType)
+    {
+        return itemType switch
+        {
+            ItemType.GunCOM15 => new[] { "COM-15", "COM15", "GunCOM15" },
+            _ => new[] { itemType.ToString() },
+        };
+    }
+
     public FirearmItem? EnsureFirearmEquipped(Player player)
     {
+        if (IsSupportedScpAttacker(player.Role))
+        {
+            return null;
+        }
+
         if (player.CurrentItem is FirearmItem currentFirearm)
         {
+            MaintainCom15FallbackAmmo(player, currentFirearm);
             return currentFirearm;
         }
 
         FirearmItem? firstFirearm = player.Items.OfType<FirearmItem>().FirstOrDefault();
+        if (firstFirearm == null)
+        {
+            firstFirearm = player.AddItem(ItemType.GunCOM15, ItemAddReason.AdminCommand) as FirearmItem;
+        }
+
         if (firstFirearm != null)
         {
             player.CurrentItem = firstFirearm;
+            MaintainCom15FallbackAmmo(player, firstFirearm);
         }
 
         return firstFirearm;
@@ -107,5 +132,20 @@ internal sealed class BotCombatService
         }
 
         return (float)((random.NextDouble() * 2d) - 1d) * maxAbsDegrees;
+    }
+
+    private static void MaintainCom15FallbackAmmo(Player player, FirearmItem firearm)
+    {
+        if (firearm.Type != ItemType.GunCOM15)
+        {
+            return;
+        }
+
+        firearm.StoredAmmo = firearm.MaxAmmo;
+        firearm.ChamberedAmmo = firearm.ChamberMax;
+        if (player.GetAmmo(ItemType.Ammo9x19) < DefaultCom15ReserveAmmo)
+        {
+            player.SetAmmo(ItemType.Ammo9x19, DefaultCom15ReserveAmmo);
+        }
     }
 }

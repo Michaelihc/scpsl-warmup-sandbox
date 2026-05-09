@@ -17,10 +17,12 @@ internal sealed class BotTargetingService
         ManagedBotState state,
         IEnumerable<Player> players,
         BotBehaviorDefinition behavior,
-        System.Random random)
+        System.Random random,
+        Func<Player, bool>? isProtectedTarget = null)
     {
         List<Player> hostiles = players
             .Where(candidate => AreHostile(bot, candidate))
+            .Where(candidate => isProtectedTarget == null || !isProtectedTarget(candidate))
             .ToList();
 
         if (hostiles.Count == 0)

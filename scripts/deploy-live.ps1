@@ -77,7 +77,6 @@ REMOTE_SERVICE_NAME="${10:-}"
 
 plugin_path="$REMOTE_PLUGIN_DIR/ScpslPluginStarter.dll"
 signal_path="$REMOTE_CONFIG_DIR/live-update-warning.txt"
-broadcast_command="bc $WARNING_SECONDS $WARNING_MESSAGE"
 
 run() {
     if [ "$DRY_RUN" = "1" ]; then
@@ -198,8 +197,6 @@ else
         printf '%s\n' "$WARNING_MESSAGE"
     } > "$signal_path"
 fi
-send_localadmin_command "$broadcast_command" || true
-
 if [ "$WARNING_SECONDS" -gt 0 ]; then
     echo "Waiting $WARNING_SECONDS seconds before restart..."
     if [ "$DRY_RUN" != "1" ]; then
@@ -228,4 +225,18 @@ start_server
 '@
 
 $dryRunValue = if ($DryRun) { "1" } else { "0" }
-$remoteScript | ssh @sshArgs bash -s -- $Port $WarningSeconds $warningMessageBase64 $RemoteRunUser $remoteServerDirBase64 $remotePluginDirBase64 $remoteConfigDirBase64 $remoteTempDll $dryRunValue $RemoteServiceName
+$remoteScript = $remoteScript -replace "`r`n", "`n" -replace "`r", "`n"
+$remoteScriptPath = "/tmp/warmup-live-deploy.sh"
+$localRemoteScript = Join-Path ([System.IO.Path]::GetTempPath()) ("warmup-live-deploy-{0}.sh" -f ([guid]::NewGuid().ToString("N")))
+try {
+    [System.IO.File]::WriteAllText($localRemoteScript, $remoteScript, [System.Text.UTF8Encoding]::new($false))
+    if ($DryRun) {
+        Write-Host "Dry run: would upload deploy helper to ${target}:$remoteScriptPath"
+    } else {
+        scp -i $KeyPath -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 $localRemoteScript "${target}:$remoteScriptPath"
+    }
+
+    ssh @sshArgs bash $remoteScriptPath $Port $WarningSeconds $warningMessageBase64 $RemoteRunUser $remoteServerDirBase64 $remotePluginDirBase64 $remoteConfigDirBase64 $remoteTempDll $dryRunValue $RemoteServiceName
+} finally {
+    Remove-Item -LiteralPath $localRemoteScript -Force -ErrorAction SilentlyContinue
+}

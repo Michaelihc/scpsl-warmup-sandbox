@@ -17,9 +17,33 @@ public sealed class PluginConfig
 
     public bool SuppressRoundEnd { get; set; } = true;
 
+    public bool DisableWarhead { get; set; } = true;
+
+    public bool DisableDecontamination { get; set; } = true;
+
+    public float SurfaceEscapeSafezoneMaxZ { get; set; } = -17f;
+
+    public string SurfaceEscapeSafezoneAxis { get; set; } = "z";
+
+    public bool SurfaceEscapeSafezoneLessThan { get; set; } = false;
+
+    public float SurfaceEscapeSafezoneMinX { get; set; } = 91f;
+
+    public bool SurfaceEscapeSafezoneHealthDrainEnabled { get; set; } = true;
+
+    public float SurfaceEscapeSafezoneHealthDrainPercentPerSecond { get; set; } = 0.5f;
+
+    public bool SurfaceEscapeSafezoneHealthDrainWarningEnabled { get; set; } = true;
+
+    public string SurfaceEscapeSafezoneHealthDrainWarningText { get; set; } = "<color=#ff6060>安全区内每秒损失 {percent}% 最大生命值</color>";
+
     public bool BroadcastWarmupStatus { get; set; } = true;
 
     public bool BroadcastHelpReminder { get; set; } = true;
+
+    public bool BroadcastCommunityReminder { get; set; } = true;
+
+    public string CommunityReminderText { get; set; } = "<size=28><color=#00ffff><b>QQ群：897907125</b></color></size>";
 
     public int HelpReminderIntervalSeconds { get; set; } = 45;
 
@@ -39,7 +63,7 @@ public sealed class PluginConfig
 
     public bool EnableSpawnProtection { get; set; } = true;
 
-    public int SpawnProtectionDurationMs { get; set; } = 5000;
+    public int SpawnProtectionDurationMs { get; set; } = 20000;
 
     public bool AutoCleanupEnabled { get; set; } = true;
 
@@ -70,6 +94,8 @@ public sealed class PluginConfig
     public int BotCount { get; set; } = 6;
 
     public int MaxBotCount { get; set; } = 30;
+
+    public int MaxPlayerBotCount { get; set; } = 10;
 
     public bool ResetBotCountWhenNoActivePlayers { get; set; } = true;
 
@@ -534,13 +560,13 @@ public sealed class BotBehaviorDefinition
 
     public float FacilityDummyFollowSpeed { get; set; } = 8.0f;
 
-    public float FacilityDummyFollowSpeedScp939 { get; set; } = 7.5f;
+    public float FacilityDummyFollowSpeedScp939 { get; set; } = 14.3f;
 
-    public float FacilityDummyFollowSpeedScp3114 { get; set; } = 7.5f;
+    public float FacilityDummyFollowSpeedScp3114 { get; set; } = 14.3f;
 
-    public float FacilityDummyFollowSpeedScp049 { get; set; } = 7.5f;
+    public float FacilityDummyFollowSpeedScp049 { get; set; } = 14.3f;
 
-    public float FacilityDummyFollowSpeedScp106 { get; set; } = 7.5f;
+    public float FacilityDummyFollowSpeedScp106 { get; set; } = 14.3f;
 
     public float FacilityDummyFollowDoorSlowSpeed { get; set; } = 3.5f;
 
