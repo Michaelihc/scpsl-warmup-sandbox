@@ -218,8 +218,8 @@ public sealed class WarmupCommand : ICommand
                 if (arguments.Count < 3)
                 {
                     response = WarmupLocalization.T(
-                        "Usage: bots set <count> OR bots set <bots|humanrespawn|botrespawn|humanrole|botrole|forceroundstart|suppressroundend|mode|map|keepmagfilled|aimode|language|retreatspeed|speed|939speed|3114speed|049speed|106speed> <value>",
-                        "用法：bots set <数量> 或 bots set <bots|humanrespawn|botrespawn|humanrole|botrole|forceroundstart|suppressroundend|mode|map|keepmagfilled|aimode|language|retreatspeed|speed|939speed|3114speed|049speed|106speed> <值>");
+                        "Usage: bots set <count> OR bots set <bots|maxbots|maxplayerbots|humanrespawn|botrespawn|humanrole|botrole|forceroundstart|suppressroundend|mode|map|keepmagfilled|aimode|language|retreatspeed|speed|939speed|3114speed|049speed|106speed> <value>",
+                        "用法：bots set <数量> 或 bots set <bots|maxbots|maxplayerbots|humanrespawn|botrespawn|humanrole|botrole|forceroundstart|suppressroundend|mode|map|keepmagfilled|aimode|language|retreatspeed|speed|939speed|3114speed|049speed|106speed> <值>");
                     return false;
                 }
 
@@ -355,8 +355,8 @@ public sealed class WarmupCommand : ICommand
     private static string BuildHelp()
     {
         return WarmupLocalization.T(
-            "bots status | playtime [limit] | updatewarning [seconds] [message] | start | restart | roundrestart | stop | save | reloadconfig | set <count> | setcount <count> | set939speed <speed> | set3114speed <speed> | set049speed <speed> | set106speed <speed> | setspeed <speed> | setretreatspeed <scale> | map <bomb|standard|true|false> | difficulty <easy|normal|hard|hardest> | aimode <classic|realistic> | language <en|cn> | set retreatspeed <scale> | set <key> <value>",
-            "bots status | playtime [limit] | updatewarning [秒数] [消息] | start | restart | roundrestart | stop | save | reloadconfig | set <数量> | setcount <数量> | set939speed <速度> | set3114speed <速度> | set049speed <速度> | set106speed <速度> | setspeed <速度> | setretreatspeed <倍率> | map <bomb|standard|true|false> | difficulty <easy|normal|hard|hardest> | aimode <classic|realistic> | language <en|cn> | set retreatspeed <倍率> | set <键> <值>");
+            "bots status | playtime [limit] | updatewarning [seconds] [message] | start | restart | roundrestart | stop | save | reloadconfig | set <count> | setcount <count> | set maxbots <count> | set maxplayerbots <count> | set939speed <speed> | set3114speed <speed> | set049speed <speed> | set106speed <speed> | setspeed <speed> | setretreatspeed <scale> | map <bomb|standard|true|false> | difficulty <easy|normal|hard|hardest> | aimode <classic|realistic> | language <en|cn> | set retreatspeed <scale> | set <key> <value>",
+            "bots status | playtime [limit] | updatewarning [秒数] [消息] | start | restart | roundrestart | stop | save | reloadconfig | set <数量> | setcount <数量> | set maxbots <数量> | set maxplayerbots <数量> | set939speed <速度> | set3114speed <速度> | set049speed <速度> | set106speed <速度> | setspeed <速度> | setretreatspeed <倍率> | map <bomb|standard|true|false> | difficulty <easy|normal|hard|hardest> | aimode <classic|realistic> | language <en|cn> | set retreatspeed <倍率> | set <键> <值>");
     }
 
     private static string BuildPlayerHelp()

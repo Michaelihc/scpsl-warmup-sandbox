@@ -1,10 +1,22 @@
 auto_start_on_waiting_for_players: false
 auto_start_on_first_player: false
 auto_start_on_round_started: true
-force_round_start_on_first_player: true
-suppress_round_end: true
+force_round_start_on_first_player: false
+suppress_round_end: false
+disable_warhead: false
+disable_decontamination: false
+surface_escape_safezone_max_z: -17
+surface_escape_safezone_axis: z
+surface_escape_safezone_less_than: false
+surface_escape_safezone_min_x: 91
+surface_escape_safezone_health_drain_enabled: true
+surface_escape_safezone_health_drain_percent_per_second: 0.5
+surface_escape_safezone_health_drain_warning_enabled: true
+surface_escape_safezone_health_drain_warning_text: '<color=#ff6060>安全区内每秒损失 {percent}% 最大生命值</color>'
 broadcast_warmup_status: true
 broadcast_help_reminder: true
+broadcast_community_reminder: true
+community_reminder_text: '<size=28><color=#00ffff><b>QQ群：897907125</b></color></size>'
 help_reminder_interval_seconds: 45
 help_reminder_duration_seconds: 6
 language: en
@@ -13,8 +25,8 @@ enable_verbose_bot_logging: false
 enable_attachment_logging: false
 enable_arena_logging: false
 enable_zoom_logging: false
-enable_spawn_protection: true
-spawn_protection_duration_ms: 5000
+enable_spawn_protection: false
+spawn_protection_duration_ms: 20000
 auto_cleanup_enabled: true
 auto_cleanup_interval_seconds: 10
 auto_cleanup_pickup_threshold: 80
@@ -45,6 +57,7 @@ playtime_tracking:
   flush_interval_seconds: 60
 bot_count: 6
 max_bot_count: 30
+max_player_bot_count: 10
 reset_bot_count_when_no_active_players: true
 no_active_players_bot_count: 5
 no_active_players_bot_reset_delay_ms: 3000
@@ -263,10 +276,10 @@ bot_behavior:
   facility_dummy_follow_max_distance: 1000.0
   facility_dummy_follow_min_distance: 1.75
   facility_dummy_follow_speed: 7.5
-  facility_dummy_follow_speed_scp939: 7.5
-  facility_dummy_follow_speed_scp3114: 7.5
-  facility_dummy_follow_speed_scp049: 7.5
-  facility_dummy_follow_speed_scp106: 7.5
+  facility_dummy_follow_speed_scp939: 14.3
+  facility_dummy_follow_speed_scp3114: 14.3
+  facility_dummy_follow_speed_scp049: 14.3
+  facility_dummy_follow_speed_scp106: 14.3
   facility_dummy_follow_door_slow_speed: 3.5
   enable_bot_door_opening: true
   bot_door_open_radius: 3.5

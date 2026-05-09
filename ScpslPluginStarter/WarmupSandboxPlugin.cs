@@ -12,8 +12,11 @@ using CommandSystem.Commands.RemoteAdmin.Dummies;
 using CustomPlayerEffects;
 using InventorySystem.Items;
 using InventorySystem.Items.Firearms.Attachments;
+using InventorySystem.Items.Jailbird;
+using InventorySystem.Items.MicroHID.Modules;
 using LabApi.Events.Arguments.PlayerEvents;
 using LabApi.Events.Arguments.ServerEvents;
+using LabApi.Events.Arguments.WarheadEvents;
 using LabApi.Events.Handlers;
 using LabApi.Features.Enums;
 using LabApi.Features.Wrappers;
@@ -28,6 +31,7 @@ using UnityEngine;
 using UnityEngine.AI;
 using ApiLogger = LabApi.Features.Console.Logger;
 using PrimitiveObjectToyWrapper = LabApi.Features.Wrappers.PrimitiveObjectToy;
+using TextToyWrapper = LabApi.Features.Wrappers.TextToy;
 
 namespace ScpslPluginStarter;
 
@@ -39,8 +43,12 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private const int BotPostSpawnHookDelayMs = 500;
     private const int BotBrainReadyRetryDelayMs = 250;
     private const int BotBrainReadyMaxAttempts = 40;
+    private const int BotNoRoomRespawnCooldownMs = 5000;
     private const int NavHeartbeatIntervalMs = 5000;
     private const int LiveUpdateSignalPollIntervalMs = 1000;
+    private const int SafezoneHealthDrainIntervalMs = 1000;
+    private const int DangerousItemProtectionMonitorIntervalMs = 250;
+    private const float DangerousItemSpawnProtectionTimeLeftSeconds = 4f;
     private const string LiveUpdateSignalFileName = "live-update-warning.txt";
     private const string HotConfigReloadSignalFileName = "hot-reload-config.txt";
     private const int MinimumAutoCleanupIntervalMs = 10000;
@@ -216,6 +224,9 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private readonly BombModeService _bombModeService = new();
     private readonly PlaytimeTrackerService _playtimeTrackerService = new();
     private readonly List<PrimitiveObjectToyWrapper> _runtimeNavMeshDebugEdges = new();
+    private readonly List<PrimitiveObjectToyWrapper> _escapeSafezoneVisuals = new();
+    private readonly List<TextToyWrapper> _escapeSafezoneLabels = new();
+    private readonly HashSet<int> _safezoneDrainDamagePlayerIds = new();
     private readonly Dictionary<int, PrimitiveObjectToyWrapper> _navAgentDebugToys = new();
     private int _botSequence;
     private int _warmupGeneration;
@@ -226,6 +237,10 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private int[] _playerPanelTargetIds = { PlayerPanelSelfTargetId };
     private int[] _playerPanelBotTargetIds = { PlayerPanelAllBotsTargetId };
     private bool _warmupActive;
+    private bool _nextHelpReminderIsCommunity;
+    private int _liveUpdateWarningUntilTick;
+    private int _safezoneHealthDrainToken;
+    private int _dangerousItemProtectionMonitorToken;
 
     public static WarmupSandboxPlugin? Instance { get; private set; }
     public override string Name => "WarmupSandbox";
@@ -246,11 +261,18 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         ServerEvents.RoundStarted += OnRoundStarted;
         ServerEvents.RoundRestarted += OnRoundRestarted;
         ServerEvents.RoundEndingConditionsCheck += OnRoundEndingConditionsCheck;
+        ServerEvents.LczDecontaminationStarting += OnLczDecontaminationStarting;
+        ServerEvents.LczDecontaminationAnnounced += OnLczDecontaminationAnnounced;
         PlayerEvents.Joined += OnPlayerJoined;
         PlayerEvents.Spawned += OnPlayerSpawned;
         PlayerEvents.Death += OnPlayerDeath;
+        PlayerEvents.Hurting += OnPlayerHurting;
         PlayerEvents.Hurt += OnPlayerHurt;
         PlayerEvents.Left += OnPlayerLeft;
+        PlayerEvents.UnlockingWarheadButton += OnPlayerUnlockingWarheadButton;
+        PlayerEvents.InteractingWarheadLever += OnPlayerInteractingWarheadLever;
+        PlayerEvents.ShootingWeapon += OnPlayerShootingWeapon;
+        PlayerEvents.DryFiringWeapon += OnPlayerDryFiringWeapon;
         PlayerEvents.ShotWeapon += OnPlayerShotWeapon;
         PlayerEvents.ReloadedWeapon += OnPlayerReloadedWeapon;
         PlayerEvents.ChangedItem += OnPlayerChangedItem;
@@ -260,6 +282,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         PlayerEvents.UsingItem += OnPlayerUsingItem;
         PlayerEvents.UsedItem += OnPlayerUsedItem;
         PlayerEvents.CancelledUsingItem += OnPlayerCancelledUsingItem;
+        PlayerEvents.ProcessingJailbirdMessage += OnPlayerProcessingJailbirdMessage;
         PlayerEvents.SearchingPickup += OnPlayerSearchingPickup;
         PlayerEvents.PickingUpItem += OnPlayerPickingUpItem;
         PlayerEvents.DroppedItem += OnPlayerDroppedItem;
@@ -267,6 +290,9 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         ServerSpecificSettingsSync.ServerOnSettingValueReceived += OnServerSpecificSettingValueReceived;
         _originalServerSpecificSettings = ServerSpecificSettingsSync.DefinedSettings;
         RefreshPlayerPanelSettings(sendToPlayers: false);
+        LabApi.Events.Handlers.WarheadEvents.Starting += OnWarheadStarting;
+        LabApi.Events.Handlers.WarheadEvents.Detonating += OnWarheadDetonating;
+        ApplyHazardDisableConfig();
         foreach (Player player in Player.ReadyList.Where(IsManagedHuman))
         {
             _playtimeTrackerService.PlayerJoined(player, Config.PlaytimeTracking);
@@ -274,6 +300,9 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
         SchedulePlaytimeFlush();
         ScheduleLiveUpdateSignalPoll();
+        ScheduleSafezoneHealthDrain();
+        ScheduleDangerousItemProtectionMonitor();
+        Schedule(EnsureEscapeSafezoneVisuals, 5000);
         ApiLogger.Info($"[{Name}] Enabled.");
     }
 
@@ -285,11 +314,14 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
 
         _warmupGeneration++;
+        _safezoneHealthDrainToken++;
+        _dangerousItemProtectionMonitorToken++;
         _warmupActive = false;
         _playtimeTrackerService.Disable();
         CleanupManagedBots();
         _bombModeService.ResetRuntime();
-        CleanupArenaMap(returnHumansToFacility: true);
+        CleanupArenaMap(returnHumansToFacility: false);
+        DestroyEscapeSafezoneVisuals();
         _facilityNavMeshService.RemoveRuntimeNavMesh();
         PlayerEvents.Cuffing -= OnPlayerCuffing;
         PlayerEvents.DroppedItem -= OnPlayerDroppedItem;
@@ -303,6 +335,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
 
         PlayerEvents.SearchingPickup -= OnPlayerSearchingPickup;
+        PlayerEvents.ProcessingJailbirdMessage -= OnPlayerProcessingJailbirdMessage;
         PlayerEvents.CancelledUsingItem -= OnPlayerCancelledUsingItem;
         PlayerEvents.UsedItem -= OnPlayerUsedItem;
         PlayerEvents.UsingItem -= OnPlayerUsingItem;
@@ -312,11 +345,20 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         PlayerEvents.ChangedItem -= OnPlayerChangedItem;
         PlayerEvents.ReloadedWeapon -= OnPlayerReloadedWeapon;
         PlayerEvents.ShotWeapon -= OnPlayerShotWeapon;
+        PlayerEvents.DryFiringWeapon -= OnPlayerDryFiringWeapon;
+        PlayerEvents.ShootingWeapon -= OnPlayerShootingWeapon;
+        PlayerEvents.InteractingWarheadLever -= OnPlayerInteractingWarheadLever;
+        PlayerEvents.UnlockingWarheadButton -= OnPlayerUnlockingWarheadButton;
+        PlayerEvents.Hurting -= OnPlayerHurting;
         PlayerEvents.Hurt -= OnPlayerHurt;
         PlayerEvents.Left -= OnPlayerLeft;
         PlayerEvents.Death -= OnPlayerDeath;
         PlayerEvents.Spawned -= OnPlayerSpawned;
         PlayerEvents.Joined -= OnPlayerJoined;
+        LabApi.Events.Handlers.WarheadEvents.Detonating -= OnWarheadDetonating;
+        LabApi.Events.Handlers.WarheadEvents.Starting -= OnWarheadStarting;
+        ServerEvents.LczDecontaminationAnnounced -= OnLczDecontaminationAnnounced;
+        ServerEvents.LczDecontaminationStarting -= OnLczDecontaminationStarting;
         ServerEvents.RoundEndingConditionsCheck -= OnRoundEndingConditionsCheck;
         ServerEvents.RoundRestarted -= OnRoundRestarted;
         ServerEvents.RoundStarted -= OnRoundStarted;
@@ -326,6 +368,9 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     private void OnWaitingForPlayers()
     {
+        EnsureEscapeSafezoneVisuals();
+        ApplyHazardDisableConfig();
+
         if (Config.AutoStartOnWaitingForPlayers && Player.List.Any(IsManagedHuman))
         {
             RestartWarmup("waiting for players");
@@ -334,6 +379,8 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     private void OnRoundStarted()
     {
+        EnsureEscapeSafezoneVisuals();
+        ApplyHazardDisableConfig();
         _roundCampDisabledUntilTick = Environment.TickCount + BotControllerService.GetCampCooldownMs();
         Schedule(() => RefreshPlayerPanelSettings(sendToPlayers: true), 1500);
         if (Config.AutoStartOnRoundStarted)
@@ -349,15 +396,129 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         _roundCampDisabledUntilTick = 0;
         CleanupManagedBots();
         _bombModeService.ResetRuntime();
-        CleanupArenaMap(returnHumansToFacility: true);
+        CleanupArenaMap(returnHumansToFacility: false);
+        DestroyEscapeSafezoneVisuals();
         _facilityNavMeshService.RemoveRuntimeNavMesh();
     }
 
     private void OnRoundEndingConditionsCheck(RoundEndingConditionsCheckEventArgs ev)
     {
-        if (_warmupActive && Config.SuppressRoundEnd)
+        // Bot-only mode never blocks the base game's round-ending conditions.
+    }
+
+    private void OnPlayerUnlockingWarheadButton(PlayerUnlockingWarheadButtonEventArgs ev)
+    {
+        if (!Config.DisableWarhead)
         {
-            ev.CanEnd = false;
+            return;
+        }
+
+        ev.IsAllowed = false;
+        TryDisableWarhead();
+        ev.Player.SendHint(WarmupLocalization.T("Warhead is disabled.", "核弹已禁用。"), 2f);
+    }
+
+    private void OnPlayerInteractingWarheadLever(PlayerInteractingWarheadLeverEventArgs ev)
+    {
+        if (!Config.DisableWarhead)
+        {
+            return;
+        }
+
+        ev.IsAllowed = false;
+        TryDisableWarhead();
+        ev.Player.SendHint(WarmupLocalization.T("Warhead is disabled.", "核弹已禁用。"), 2f);
+    }
+
+    private void OnWarheadStarting(WarheadStartingEventArgs ev)
+    {
+        if (!Config.DisableWarhead)
+        {
+            return;
+        }
+
+        ev.IsAllowed = false;
+        TryDisableWarhead();
+    }
+
+    private void OnWarheadDetonating(WarheadDetonatingEventArgs ev)
+    {
+        if (!Config.DisableWarhead)
+        {
+            return;
+        }
+
+        ev.IsAllowed = false;
+        TryDisableWarhead();
+    }
+
+    private void OnLczDecontaminationStarting(LczDecontaminationStartingEventArgs ev)
+    {
+        if (!Config.DisableDecontamination)
+        {
+            return;
+        }
+
+        ev.IsAllowed = false;
+        TryDisableDecontamination();
+    }
+
+    private void OnLczDecontaminationAnnounced(LczDecontaminationAnnouncedEventArgs ev)
+    {
+        if (Config.DisableDecontamination)
+        {
+            TryDisableDecontamination();
+        }
+    }
+
+    private void ApplyHazardDisableConfig()
+    {
+        if (Config.DisableWarhead)
+        {
+            TryDisableWarhead();
+        }
+
+        if (Config.DisableDecontamination)
+        {
+            TryDisableDecontamination();
+        }
+    }
+
+    private void TryDisableWarhead()
+    {
+        try
+        {
+            if (!Warhead.Exists)
+            {
+                return;
+            }
+
+            if (Warhead.IsDetonationInProgress)
+            {
+                Warhead.Stop(null);
+            }
+
+            Warhead.LeverStatus = false;
+            Warhead.IsAuthorized = false;
+            Warhead.IsLocked = true;
+            Warhead.ForceCountdownToggle = false;
+            Warhead.DeadManSwitchRemaining = 0f;
+        }
+        catch (Exception ex)
+        {
+            ApiLogger.Warn($"[{Name}] Failed to disable warhead: {ex.Message}");
+        }
+    }
+
+    private void TryDisableDecontamination()
+    {
+        try
+        {
+            Decontamination.Status = LightContainmentZoneDecontamination.DecontaminationController.DecontaminationStatus.Disabled;
+        }
+        catch (Exception ex)
+        {
+            ApiLogger.Warn($"[{Name}] Failed to disable LCZ decontamination: {ex.Message}");
         }
     }
 
@@ -390,30 +551,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             }, Config.JoinSetupDelayMs);
         }
 
-        if (!_warmupActive || !IsManagedHuman(ev.Player))
-        {
-            return;
-        }
-
-        int currentGeneration = _warmupGeneration;
-        Schedule(() =>
-        {
-            if (!IsCurrentGeneration(currentGeneration) || !IsManagedHuman(ev.Player))
-            {
-                return;
-            }
-
-            if (IsBombModeRoundActive())
-            {
-                ev.Player.SetRole(RoleTypeId.Spectator, RoleChangeReason.RemoteAdmin, RoleSpawnFlags.None);
-                ev.Player.SendHint(WarmupLocalization.T(
-                    "Bomb round is already in progress. You will join on the next round.",
-                    "爆破回合已在进行中。你将在下一回合加入。"), 5f);
-                return;
-            }
-
-            RespawnHuman(ev.Player);
-        }, Config.JoinSetupDelayMs);
+        // Joining players are not moved, respawned, or assigned a sandbox loadout.
     }
 
     private void OnPlayerSpawned(PlayerSpawnedEventArgs ev)
@@ -432,15 +570,11 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             }
 
             ConfigureSpawnedBot(ev.Player);
-            GrantSpawnProtection(ev.Player);
+            ClearBotSpawnProtection(ev.Player);
             return;
         }
 
-        if (IsManagedHuman(ev.Player) && ev.Player.Role != RoleTypeId.Spectator)
-        {
-            ConfigureSpawnedHuman(ev.Player);
-            GrantSpawnProtection(ev.Player);
-        }
+        // Bot-only mode leaves human spawns exactly as the base round created them.
     }
 
     private void OnPlayerDeath(PlayerDeathEventArgs ev)
@@ -458,24 +592,8 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                 botState.RespawnRole = ev.Player.Role;
             }
 
-            if (IsBombModeRoundActive())
-            {
-                CancelBotBrainForRound(ev.Player.PlayerId);
-                return;
-            }
-
-            ScheduleBotRespawn(ev.Player.PlayerId);
+            RemoveManagedBot(ev.Player.PlayerId);
             return;
-        }
-
-        if (IsManagedHuman(ev.Player))
-        {
-            if (IsBombModeRoundActive())
-            {
-                return;
-            }
-
-            ScheduleHumanRespawn(ev.Player.PlayerId);
         }
     }
 
@@ -492,16 +610,84 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         SpawnProtected.TryGiveProtection(player.ReferenceHub);
     }
 
+    private static void CancelSpawnProtection(Player player)
+    {
+        if (player.ReferenceHub == null)
+        {
+            return;
+        }
+
+        player.ReferenceHub.playerEffectsController.DisableEffect<SpawnProtected>();
+    }
+
+    private static bool TryGetSpawnProtection(Player player, out SpawnProtected spawnProtected)
+    {
+        spawnProtected = null!;
+        return player.ReferenceHub != null
+            && player.ReferenceHub.playerEffectsController.TryGetEffect(out spawnProtected)
+            && spawnProtected != null;
+    }
+
+    private void ClearBotSpawnProtection(Player bot)
+    {
+        CancelSpawnProtection(bot);
+        int playerId = bot.PlayerId;
+        int generation = _warmupGeneration;
+        foreach (int delayMs in new[] { 100, 500, 1500 })
+        {
+            Schedule(() =>
+            {
+                if (!IsCurrentGeneration(generation)
+                    || !Player.TryGet(playerId, out Player liveBot)
+                    || !IsManagedBot(liveBot))
+                {
+                    return;
+                }
+
+                CancelSpawnProtection(liveBot);
+            }, delayMs);
+        }
+    }
+
     private void ApplyNativeSpawnProtectionConfig()
     {
         SpawnProtected.IsProtectionEnabled = Config.EnableSpawnProtection;
         SpawnProtected.SpawnDuration = Math.Max(0f, Config.SpawnProtectionDurationMs / 1000f);
     }
 
+    private void OnPlayerHurting(PlayerHurtingEventArgs ev)
+    {
+        if (!_warmupActive)
+        {
+            return;
+        }
+
+        if (IsManagedBot(ev.Player)
+            && IsInEscapeSafezone(ev.Player)
+            && !_safezoneDrainDamagePlayerIds.Contains(ev.Player.PlayerId))
+        {
+            ev.IsAllowed = false;
+            ZeroDamage(ev.DamageHandler);
+            return;
+        }
+    }
+
     private void OnPlayerHurt(PlayerHurtEventArgs ev)
     {
-        if (!_warmupActive
-            || !IsManagedBot(ev.Player)
+        if (!_warmupActive)
+        {
+            return;
+        }
+
+        if (IsManagedBot(ev.Player)
+            && IsInEscapeSafezone(ev.Player)
+            && !_safezoneDrainDamagePlayerIds.Contains(ev.Player.PlayerId))
+        {
+            ZeroDamage(ev.DamageHandler);
+            return;
+        }
+
+        if (!IsManagedBot(ev.Player)
             || !_managedBots.TryGetValue(ev.Player.PlayerId, out ManagedBotState state))
         {
             return;
@@ -513,6 +699,14 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
 
         TriggerReactiveStrafe(ev.Player, state, ev.Attacker);
+    }
+
+    private static void ZeroDamage(PlayerStatsSystem.DamageHandlerBase damageHandler)
+    {
+        if (damageHandler is PlayerStatsSystem.StandardDamageHandler standardDamageHandler)
+        {
+            standardDamageHandler.Damage = 0f;
+        }
     }
 
     private void OnPlayerLeft(PlayerLeftEventArgs ev)
@@ -545,6 +739,26 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         ScheduleNoActivePlayersBotReset();
     }
 
+    private void OnPlayerShootingWeapon(PlayerShootingWeaponEventArgs ev)
+    {
+        if (!_warmupActive || !IsManagedBot(ev.Player) || !IsInEscapeSafezone(ev.Player))
+        {
+            return;
+        }
+
+        ev.IsAllowed = false;
+    }
+
+    private void OnPlayerDryFiringWeapon(PlayerDryFiringWeaponEventArgs ev)
+    {
+        if (!_warmupActive || !IsManagedBot(ev.Player) || !IsInEscapeSafezone(ev.Player))
+        {
+            return;
+        }
+
+        ev.IsAllowed = false;
+    }
+
     private void OnPlayerShotWeapon(PlayerShotWeaponEventArgs ev)
     {
         if (!_warmupActive || !IsManagedParticipant(ev.Player))
@@ -567,7 +781,10 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             LogBotEventByPlayerId(ev.Player.PlayerId, $"shot-event item={ev.FirearmItem?.Type} loaded={GetLoadedAmmoSafe(ev.FirearmItem)} reserve={GetReserveAmmoSafe(ev.Player, ev.FirearmItem)}");
         }
 
-        MaintainReserveAmmo(ev.Player, ev.FirearmItem);
+        if (IsManagedBot(ev.Player))
+        {
+            MaintainReserveAmmo(ev.Player, ev.FirearmItem);
+        }
     }
 
     private void OnPlayerReloadedWeapon(PlayerReloadedWeaponEventArgs ev)
@@ -582,7 +799,10 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             LogBotEventByPlayerId(ev.Player.PlayerId, $"reload-event item={ev.FirearmItem?.Type} loaded={GetLoadedAmmoSafe(ev.FirearmItem)} reserve={GetReserveAmmoSafe(ev.Player, ev.FirearmItem)}");
         }
 
-        MaintainReserveAmmo(ev.Player, ev.FirearmItem);
+        if (IsManagedBot(ev.Player))
+        {
+            MaintainReserveAmmo(ev.Player, ev.FirearmItem);
+        }
 
         if (IsManagedBot(ev.Player)
             && ev.FirearmItem != null
@@ -596,10 +816,44 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     {
         _bombModeService.OnChangedItem(ev);
 
-        if (_warmupActive && IsManagedParticipant(ev.Player))
+        if (_warmupActive && IsManagedBot(ev.Player))
         {
             MaintainReserveAmmo(ev.Player, ev.NewItem as FirearmItem);
         }
+    }
+
+    private void TrimSpawnProtectionForDangerousItemUse(Player player)
+    {
+        if (!_warmupActive
+            || !IsManagedHuman(player)
+            || !TryGetSpawnProtection(player, out SpawnProtected spawnProtected)
+            || !spawnProtected.IsEnabled
+            || spawnProtected.TimeLeft <= DangerousItemSpawnProtectionTimeLeftSeconds)
+        {
+            return;
+        }
+
+        spawnProtected.TimeLeft = DangerousItemSpawnProtectionTimeLeftSeconds;
+    }
+
+    private void OnPlayerProcessingJailbirdMessage(PlayerProcessingJailbirdMessageEventArgs ev)
+    {
+        if (!_warmupActive
+            || !IsManagedHuman(ev.Player)
+            || !IsJailbirdDangerousUseMessage(ev.Message))
+        {
+            return;
+        }
+
+        TrimSpawnProtectionForDangerousItemUse(ev.Player);
+    }
+
+    private static bool IsJailbirdDangerousUseMessage(JailbirdMessageType message)
+    {
+        return message is JailbirdMessageType.AttackTriggered
+            or JailbirdMessageType.AttackPerformed
+            or JailbirdMessageType.ChargeLoadTriggered
+            or JailbirdMessageType.ChargeStarted;
     }
 
     private void OnPlayerSearchedToy(PlayerSearchedToyEventArgs ev)
@@ -693,11 +947,6 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         PrepareFacilityNavMeshForWarmup();
         CleanupArmorPickups();
 
-        foreach (Player player in Player.List.Where(IsManagedHuman))
-        {
-            RespawnHuman(player);
-        }
-
         Schedule(() =>
         {
             if (!IsCurrentGeneration(generation) || !_warmupActive)
@@ -729,28 +978,6 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                 player.SendHint(statusText, 4f);
             }
         }
-    }
-
-    private void RespawnHuman(Player player)
-    {
-        if (IsManagedHuman(player))
-        {
-            player.SetRole(GetHumanRole(player), RoleChangeReason.RemoteAdmin, RoleSpawnFlags.All);
-        }
-    }
-
-    private void ScheduleHumanRespawn(int playerId)
-    {
-        int generation = _warmupGeneration;
-        Schedule(() =>
-        {
-            if (!IsCurrentGeneration(generation) || !Player.TryGet(playerId, out Player player) || !IsManagedHuman(player))
-            {
-                return;
-            }
-
-            player.SetRole(GetHumanRole(player), RoleChangeReason.Respawn, RoleSpawnFlags.All);
-        }, Config.HumanRespawnDelayMs);
     }
 
     private void EnsureBotPopulation(int generation)
@@ -812,6 +1039,12 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         return Math.Min(Math.Max(0, botCount), Math.Max(0, Config.MaxBotCount));
     }
 
+    private int ClampPlayerBotCount(int botCount)
+    {
+        int playerMax = Math.Min(Math.Max(0, Config.MaxPlayerBotCount), Math.Max(0, Config.MaxBotCount));
+        return Math.Min(Math.Max(0, botCount), playerMax);
+    }
+
     private void ClampConfiguredBotCount()
     {
         int clamped = ClampBotCount(Config.BotCount);
@@ -826,13 +1059,19 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     private void ClampConfiguredLimits()
     {
-        if (Config.MaxBotCount >= 0)
+        if (Config.MaxBotCount < 0)
+        {
+            ApiLogger.Warn($"[{Name}] Configured max bot count {Config.MaxBotCount} is negative; clamping to 0.");
+            Config.MaxBotCount = 0;
+        }
+
+        if (Config.MaxPlayerBotCount >= 0)
         {
             return;
         }
 
-        ApiLogger.Warn($"[{Name}] Configured max bot count {Config.MaxBotCount} is negative; clamping to 0.");
-        Config.MaxBotCount = 0;
+        ApiLogger.Warn($"[{Name}] Configured player max bot count {Config.MaxPlayerBotCount} is negative; clamping to 0.");
+        Config.MaxPlayerBotCount = 0;
     }
 
     private void SpawnBot(int generation)
@@ -943,31 +1182,6 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }, attempt == 0 ? Config.BotInitialActivationDelayMs : Config.BotActivationRetryDelayMs);
     }
 
-    private void ConfigureSpawnedHuman(Player player)
-    {
-        if (player.Team == Team.SCPs)
-        {
-            RestoreVitals(player);
-            return;
-        }
-
-        NamedLoadoutDefinition? preset = GetSelectedHumanPreset(player);
-        LoadoutDefinition? loadout = GetHumanLoadout(player);
-        if (!(preset?.UseRoleDefaultLoadout ?? false) && loadout != null)
-        {
-            ApplyLoadout(player, loadout, isBot: false);
-        }
-
-        ApplyArenaSpawnIfNeeded(player, isBot: false);
-        RestoreVitals(player);
-        EnsureFirearmEquipped(player);
-        MaintainReserveAmmo(player, player.CurrentItem as FirearmItem);
-        if (Config.EnableArenaLogging)
-        {
-            ApiLogger.Info($"[{Name}] [HumanSpawn:{player.Nickname}] role={player.Role} team={player.Team} isNTF={player.IsNTF} isChaos={player.IsChaos} pos=({player.Position.x:F1},{player.Position.y:F1},{player.Position.z:F1})");
-        }
-    }
-
     private void ConfigureSpawnedBot(Player player)
     {
         if (!_managedBots.TryGetValue(player.PlayerId, out ManagedBotState state))
@@ -985,7 +1199,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         {
             ApplyLoadout(player, botLoadout, isBot: true);
         }
-        EnsureFirearmEquipped(player);
+        EnsureFirearmEquipped(player, allowFallbackCom15: true);
         MaintainReserveAmmo(player, player.CurrentItem as FirearmItem);
         RandomizeBotInventoryFirearmAttachments(player, "spawn-configure");
         int arenaReadyDelayMs = ApplyArenaSpawnIfNeeded(player, isBot: true);
@@ -1041,7 +1255,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                 return;
             }
 
-            EnsureFirearmEquipped(liveBot);
+            EnsureFirearmEquipped(liveBot, allowFallbackCom15: true);
             ScheduleBotBrain(player.PlayerId, brainToken, _warmupGeneration);
         }, arenaReadyDelayMs);
     }
@@ -1176,6 +1390,12 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
         ApplyRoundCampGate(state);
         bool useDust2Arena = ShouldUseDust2Arena() && _dust2MapService.IsLoaded;
+        if (!useDust2Arena && TryRecoverBotOutsideAnyRoom(bot, state, generation))
+        {
+            ScheduleBotBrain(playerId, brainToken, generation);
+            return;
+        }
+
         bool useDust2NavMesh = useDust2Arena
             && Config.Dust2Map.RuntimeNavMeshEnabled
             && _dust2MapService.HasRuntimeNavMesh;
@@ -1204,12 +1424,50 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             LogNavDebug,
             UpdateFacilityDummyFollower,
             UpdateZoomHold,
+            IsInEscapeSafezone,
             brainToken,
             generation);
         UpdateFacilityNavAgentFollower(bot, state, useNavMesh, useDust2Arena);
         UpdateNavAgentDebugVisual(bot, state, useNavMesh, useDust2Arena);
 
         ScheduleBotBrain(playerId, brainToken, generation);
+    }
+
+    private bool TryRecoverBotOutsideAnyRoom(Player bot, ManagedBotState state, int generation)
+    {
+        if (Room.TryGetRoomAtPosition(bot.Position, out Room room)
+            && room != null
+            && !room.IsDestroyed)
+        {
+            return false;
+        }
+
+        int nowTick = Environment.TickCount;
+        if (unchecked(nowTick - state.LastNoRoomRespawnTick) < BotNoRoomRespawnCooldownMs)
+        {
+            return true;
+        }
+
+        state.LastNoRoomRespawnTick = nowTick;
+        state.ResetNavigationRuntimeState();
+        state.Engagement.Reset();
+        RoleTypeId respawnRole = GetBotRespawnRole(state);
+        LogBotEvent(state, $"no-room-respawn role={respawnRole} pos={FormatVector(bot.Position)}");
+        bot.SetRole(respawnRole, RoleChangeReason.Respawn, RoleSpawnFlags.All);
+        ClearBotSpawnProtection(bot);
+
+        int playerId = bot.PlayerId;
+        Schedule(() =>
+        {
+            if (IsCurrentGeneration(generation)
+                && Player.TryGet(playerId, out Player liveBot)
+                && IsManagedBot(liveBot))
+            {
+                ClearBotSpawnProtection(liveBot);
+            }
+        }, BotPostSpawnHookDelayMs);
+
+        return true;
     }
 
     private void ApplyRoundCampGate(ManagedBotState state)
@@ -1292,6 +1550,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
         state.LastReloadAttemptTick = nowTick;
         ReleaseZoomHold(bot, state, "reload");
+        MaintainReserveAmmo(bot, firearm);
 
         bool triggered = false;
         if (firearm.CanReload && !firearm.IsReloadingOrUnloading)
@@ -1302,6 +1561,12 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         if (!triggered)
         {
             triggered = TryInvokeDummyAction(bot, Config.BotBehavior.ReloadActionName);
+        }
+
+        if (!triggered && GetLoadedAmmo(firearm) <= 1)
+        {
+            RefillFirearm(firearm);
+            MaintainReserveAmmo(bot, firearm);
         }
 
         LogBotEvent(state, $"reload-attempt triggered={triggered} item={firearm.Type} loaded={GetLoadedAmmo(firearm)} reserve={GetReserveAmmoSafe(bot, firearm)}");
@@ -1535,7 +1800,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                     return;
                 }
 
-                EnsureFirearmEquipped(liveBot);
+                EnsureFirearmEquipped(liveBot, allowFallbackCom15: true);
                 RandomizeBotInventoryFirearmAttachments(liveBot, $"delayed-{delayMs}ms");
             }, delayMs);
         }
@@ -1748,7 +2013,9 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     public string BuildLoadoutMenu(Player player)
     {
-        return _humanPresetService.BuildMenu(Config, _selectedHumanLoadouts, player);
+        return WarmupLocalization.T(
+            "Human loadout controls are disabled in bot-only mode.",
+            "仅机器人模式已禁用人类预设功能。");
     }
 
     public string GetSelectedHumanLoadoutName(Player player)
@@ -1758,62 +2025,10 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     public bool TrySelectHumanLoadout(Player player, string selector, bool applyNow, out string response)
     {
-        if (!IsManagedHuman(player))
-        {
-            response = WarmupLocalization.T(
-                "Only active human players can choose a loadout.",
-                "只有存活玩家可以选择预设。");
-            return false;
-        }
-
-        if (TryGetTemporaryScpRole(selector, out RoleTypeId scpRole))
-        {
-            return TryApplyTemporaryScpRole(player, scpRole, out response);
-        }
-
-        NamedLoadoutDefinition? preset = FindHumanLoadoutPreset(selector);
-        if (preset == null)
-        {
-            response = BuildLoadoutMenu(player);
-            return false;
-        }
-
-        _selectedHumanLoadouts[player.PlayerId] = preset.Name;
         response = WarmupLocalization.T(
-            $"Selected preset: {preset.Name} ({preset.Role}).",
-            $"已选择预设：{preset.Name}（{preset.Role}）。");
-
-        RoleTypeId selectedRole = preset.Role;
-        bool shouldRespawnForPreset = preset.UseRoleDefaultLoadout || player.Role != selectedRole;
-        if (applyNow)
-        {
-            if (player.Role == RoleTypeId.Spectator)
-            {
-                player.SetRole(selectedRole, RoleChangeReason.RemoteAdmin, RoleSpawnFlags.All);
-                response += WarmupLocalization.T(
-                    " Respawning at the default spawnpoint.",
-                    " 正在默认出生点重生。");
-            }
-            else if (shouldRespawnForPreset)
-            {
-                player.SetRole(selectedRole, RoleChangeReason.RemoteAdmin, RoleSpawnFlags.All);
-                response += preset.UseRoleDefaultLoadout
-                    ? WarmupLocalization.T(" Respawning now with role-default gear.", " 正在以阵营默认装备重生。")
-                    : WarmupLocalization.T(" Respawning now with the selected role.", " 正在以所选阵营重生。");
-            }
-            else if (preset.Loadout != null)
-            {
-                ApplyLoadout(player, preset.Loadout, isBot: false);
-                RestoreVitals(player);
-                FirearmItem? firearm = player.CurrentItem as FirearmItem ?? player.Items.OfType<FirearmItem>().FirstOrDefault();
-                response += firearm == null || !IsAmmoType(firearm.AmmoType)
-                    ? WarmupLocalization.T(" Applied immediately.", " 已立即应用。")
-                    : WarmupLocalization.T($" Applied immediately. Ammo={player.GetAmmo(firearm.AmmoType)}.", $" 已立即应用。弹药={player.GetAmmo(firearm.AmmoType)}。");
-            }
-        }
-
-        ShowLoadoutMenuHint(player, 6f);
-        return true;
+            "Human loadout controls are disabled in bot-only mode.",
+            "仅机器人模式已禁用人类预设功能。");
+        return false;
     }
 
     private bool TryApplyTemporaryScpRole(Player player, RoleTypeId scpRole, out string response)
@@ -1891,17 +2106,48 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
     }
 
-    private void EnsureFirearmEquipped(Player player)
+    private void EnsureFirearmEquipped(Player player, bool allowFallbackCom15)
     {
-        if (player.CurrentItem is FirearmItem)
+        if (allowFallbackCom15 && BotCombatService.IsSupportedScpAttacker(player.Role))
         {
             return;
         }
 
+        if (player.CurrentItem is FirearmItem)
+        {
+            MaintainCom15FallbackAmmo(player, player.CurrentItem as FirearmItem);
+            return;
+        }
+
         FirearmItem? firearm = player.Items.OfType<FirearmItem>().FirstOrDefault();
+        if (firearm == null && allowFallbackCom15)
+        {
+            firearm = player.AddItem(ItemType.GunCOM15, ItemAddReason.AdminCommand) as FirearmItem;
+            if (firearm != null)
+            {
+                RefillFirearm(firearm);
+                player.SetAmmo(ItemType.Ammo9x19, Math.Max(player.GetAmmo(ItemType.Ammo9x19), DefaultReserveAmmoTarget));
+            }
+        }
+
         if (firearm != null)
         {
             player.CurrentItem = firearm;
+            MaintainCom15FallbackAmmo(player, firearm);
+        }
+    }
+
+    private static void MaintainCom15FallbackAmmo(Player player, FirearmItem? firearm)
+    {
+        if (firearm?.Type != ItemType.GunCOM15)
+        {
+            return;
+        }
+
+        RefillFirearm(firearm);
+        if (player.GetAmmo(ItemType.Ammo9x19) < DefaultReserveAmmoTarget)
+        {
+            player.SetAmmo(ItemType.Ammo9x19, DefaultReserveAmmoTarget);
         }
     }
 
@@ -1918,21 +2164,18 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     private void MaintainReserveAmmo(Player player, FirearmItem? firearm)
     {
+        if (!IsManagedBot(player))
+        {
+            return;
+        }
+
         if (firearm == null || !IsAmmoType(firearm.AmmoType))
         {
             return;
         }
 
-        LoadoutDefinition? loadout = null;
-        if (IsManagedBot(player))
-        {
-            _managedBots.TryGetValue(player.PlayerId, out ManagedBotState? state);
-            loadout = GetBotLoadout(player, state);
-        }
-        else
-        {
-            loadout = GetHumanLoadout(player);
-        }
+        _managedBots.TryGetValue(player.PlayerId, out ManagedBotState? state);
+        LoadoutDefinition? loadout = GetBotLoadout(player, state);
 
         if (loadout != null && !loadout.InfiniteReserveAmmo)
         {
@@ -2155,7 +2398,8 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             return false;
         }
 
-        if (bot.CurrentItem is not FirearmItem)
+        bool usesScpAttack = BotCombatService.IsSupportedScpAttacker(bot.Role);
+        if (!usesScpAttack && bot.CurrentItem is not FirearmItem)
         {
             return false;
         }
@@ -2283,45 +2527,51 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             || actionName.IndexOf("drop", StringComparison.OrdinalIgnoreCase) >= 0;
     }
 
-    private static string GetCurrentItemModulePrefix(Player bot)
+    private static string[] GetCurrentItemModulePrefixes(Player bot)
     {
-        return bot.CurrentItem?.Type.ToString() ?? string.Empty;
+        return bot.CurrentItem == null
+            ? Array.Empty<string>()
+            : BotCombatService.GetItemActionCategoryAliases(bot.CurrentItem.Type);
     }
 
-    private static int ScoreDummyActionCategory(string category, string itemModulePrefix)
+    private static int ScoreDummyActionCategory(string category, string[] itemModulePrefixes)
     {
-        if (string.IsNullOrWhiteSpace(itemModulePrefix))
+        if (itemModulePrefixes == null || itemModulePrefixes.Length == 0)
         {
             return string.IsNullOrWhiteSpace(category) ? 10 : 0;
         }
 
-        if (category.StartsWith(itemModulePrefix + " (#", StringComparison.OrdinalIgnoreCase))
+        int bestScore = string.IsNullOrWhiteSpace(category) ? 100 : 0;
+        foreach (string itemModulePrefix in itemModulePrefixes.Where(prefix => !string.IsNullOrWhiteSpace(prefix)))
         {
-            return 500;
+            if (category.StartsWith(itemModulePrefix + " (#", StringComparison.OrdinalIgnoreCase))
+            {
+                bestScore = Math.Max(bestScore, 500);
+            }
+
+            string anyCategory = $"{itemModulePrefix} (ANY)";
+            if (string.Equals(category, anyCategory, StringComparison.OrdinalIgnoreCase))
+            {
+                bestScore = Math.Max(bestScore, 400);
+            }
+
+            if (category.StartsWith(itemModulePrefix + " (", StringComparison.OrdinalIgnoreCase))
+            {
+                bestScore = Math.Max(bestScore, 300);
+            }
+
+            if (string.Equals(category, itemModulePrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                bestScore = Math.Max(bestScore, 200);
+            }
+
+            if (category.IndexOf(itemModulePrefix, StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                bestScore = Math.Max(bestScore, 100);
+            }
         }
 
-        string anyCategory = $"{itemModulePrefix} (ANY)";
-        if (string.Equals(category, anyCategory, StringComparison.OrdinalIgnoreCase))
-        {
-            return 400;
-        }
-
-        if (category.StartsWith(itemModulePrefix + " (", StringComparison.OrdinalIgnoreCase))
-        {
-            return 300;
-        }
-
-        if (string.Equals(category, itemModulePrefix, StringComparison.OrdinalIgnoreCase))
-        {
-            return 200;
-        }
-
-        if (category.IndexOf(itemModulePrefix, StringComparison.OrdinalIgnoreCase) >= 0)
-        {
-            return 100;
-        }
-
-        return string.IsNullOrWhiteSpace(category) ? 100 : 0;
+        return bestScore;
     }
 
     private string[] GetAvailableShootModuleCatalog(Player bot)
@@ -2353,7 +2603,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         {
             if (IsItemScopedActionName(actionName))
             {
-                string itemModulePrefix = GetCurrentItemModulePrefix(bot);
+                string[] itemModulePrefixes = GetCurrentItemModulePrefixes(bot);
                 GroupedDummyActionEntry[] groupedActions = GetGroupedDummyActions(bot);
                 if (groupedActions.Length > 0)
                 {
@@ -2361,7 +2611,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                     {
                         GroupedDummyActionEntry groupedMatch = groupedActions
                             .Where(candidate => string.Equals(candidate.Action.Name, variant, StringComparison.OrdinalIgnoreCase))
-                            .OrderByDescending(candidate => ScoreDummyActionCategory(candidate.Category, itemModulePrefix))
+                            .OrderByDescending(candidate => ScoreDummyActionCategory(candidate.Category, itemModulePrefixes))
                             .ThenBy(candidate => candidate.Category, StringComparer.OrdinalIgnoreCase)
                             .FirstOrDefault();
 
@@ -2472,6 +2722,12 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     private void TryShootBot(Player bot, ManagedBotState state, Player target, int brainToken, int generation)
     {
+        if (IsInEscapeSafezone(bot))
+        {
+            LogBotShot(state, "shot-skip escape-safezone");
+            return;
+        }
+
         int nowTick = Environment.TickCount;
         FirearmItem? firearm = bot.CurrentItem as FirearmItem;
         int loadedAmmo = firearm == null ? -1 : GetLoadedAmmo(firearm);
@@ -2482,14 +2738,32 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         int minShotIntervalMs = campBoost
             ? Math.Max(1, Config.BotBehavior.MinShotIntervalMs / 2)
             : Config.BotBehavior.MinShotIntervalMs;
+        int weaponShotIntervalMs = GetWeaponShotIntervalMs(firearm);
+        if (weaponShotIntervalMs > 0)
+        {
+            minShotIntervalMs = Math.Max(minShotIntervalMs, weaponShotIntervalMs);
+        }
 
         if (unchecked(nowTick - state.LastShotTick) < minShotIntervalMs)
         {
-            LogBotShot(state, $"shot-skip cooldown target={targetName} item={itemName} loaded={loadedAmmo} reserve={reserveAmmo}");
+            LogBotShot(state, $"shot-skip cooldown interval={minShotIntervalMs} weaponInterval={weaponShotIntervalMs} target={targetName} item={itemName} loaded={loadedAmmo} reserve={reserveAmmo}");
             return;
         }
 
         state.LastShotTick = nowTick;
+
+        if (TryFireNativeFirearm(bot, firearm, out string nativeActionModule))
+        {
+            state.PendingShotVerificationTick = nowTick;
+            state.PendingShotLoadedAmmo = loadedAmmo;
+            state.LastShotActionName = "native-fire";
+            state.LastShotModuleName = nativeActionModule;
+            LogBotShot(
+                state,
+                $"shot-ok action=native-fire module={nativeActionModule} target={targetName} item={itemName} loaded={loadedAmmo} reserve={reserveAmmo}");
+            SchedulePostShotVerification(bot.PlayerId, brainToken, generation);
+            return;
+        }
 
         string[] shootCandidates = GetShootActionCandidates(bot, state);
         bool fired = false;
@@ -2546,6 +2820,114 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             }, shootReleaseDelayMs);
         }
 
+    }
+
+    private bool TryFireNativeFirearm(Player bot, FirearmItem? firearm, out string actionModule)
+    {
+        actionModule = "";
+        if (firearm == null || GetLoadedAmmo(firearm) <= 0 || firearm.IsReloadingOrUnloading)
+        {
+            return false;
+        }
+
+        try
+        {
+            object? module = typeof(FirearmItem)
+                .GetProperty("ActionModule", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                ?.GetValue(firearm);
+            if (module == null)
+            {
+                return false;
+            }
+
+            MethodInfo? method = new[] { "ServerShoot", "ServerProcessShot", "ServerFire" }
+                .Select(name => module.GetType().GetMethod(
+                    name,
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                    binder: null,
+                    types: new[] { typeof(ReferenceHub) },
+                    modifiers: null))
+                .FirstOrDefault(candidate => candidate != null);
+            if (method == null)
+            {
+                return false;
+            }
+
+            method.Invoke(module, new object[] { bot.ReferenceHub });
+            actionModule = module.GetType().Name + "." + method.Name;
+            return true;
+        }
+        catch (TargetInvocationException ex) when (ex.InnerException != null)
+        {
+            ApiLogger.Warn($"[{Name}] Native firearm shot failed for {bot.Nickname}: {ex.InnerException.Message}");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            ApiLogger.Warn($"[{Name}] Native firearm shot failed for {bot.Nickname}: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static int GetWeaponShotIntervalMs(FirearmItem? firearm)
+    {
+        if (firearm == null)
+        {
+            return 0;
+        }
+
+        object? module = typeof(FirearmItem)
+            .GetProperty("ActionModule", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            ?.GetValue(firearm);
+        if (TryGetFloatProperty(module, "TimeBetweenShots", out float timeBetweenShots)
+            && timeBetweenShots > 0f)
+        {
+            return Mathf.CeilToInt(timeBetweenShots * 1000f);
+        }
+
+        float fireRate = firearm.Firerate;
+        if (fireRate <= 0f)
+        {
+            return 0;
+        }
+
+        float secondsBetweenShots = fireRate > 20f
+            ? 60f / fireRate
+            : 1f / fireRate;
+        return Mathf.CeilToInt(secondsBetweenShots * 1000f);
+    }
+
+    private static bool TryGetFloatProperty(object? instance, string propertyName, out float value)
+    {
+        value = 0f;
+        if (instance == null)
+        {
+            return false;
+        }
+
+        try
+        {
+            object? raw = instance.GetType()
+                .GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                ?.GetValue(instance);
+            if (raw is float floatValue)
+            {
+                value = floatValue;
+                return true;
+            }
+
+            if (raw is double doubleValue)
+            {
+                value = (float)doubleValue;
+                return true;
+            }
+        }
+        catch
+        {
+            return false;
+        }
+
+        return false;
     }
 
     private void UpdateZoomHold(Player bot, ManagedBotState state, BotTargetSelection? target)
@@ -2834,6 +3216,37 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         });
     }
 
+    private bool IsInEscapeSafezone(Player player)
+    {
+        if (player == null || player.IsDestroyed || player.ReferenceHub == null)
+        {
+            return false;
+        }
+
+        float coordinate = GetSurfaceEscapeSafezoneCoordinate(player.Position);
+        bool insideByCoordinate = Config.SurfaceEscapeSafezoneLessThan
+            ? coordinate <= Config.SurfaceEscapeSafezoneMaxZ
+            : coordinate >= Config.SurfaceEscapeSafezoneMaxZ;
+        if (!insideByCoordinate)
+        {
+            return false;
+        }
+
+        return player.Position.x > Config.SurfaceEscapeSafezoneMinX
+            && TryGetClosestRoomZone(player.Position, out FacilityZone zone)
+            && zone == FacilityZone.Surface;
+    }
+
+    private float GetSurfaceEscapeSafezoneCoordinate(Vector3 position)
+    {
+        return Config.SurfaceEscapeSafezoneAxis.Trim().ToLowerInvariant() switch
+        {
+            "x" => position.x,
+            "y" => position.y,
+            _ => position.z,
+        };
+    }
+
     private void SchedulePlaytimeFlush()
     {
         int delayMs = Math.Max(10, Config.PlaytimeTracking.FlushIntervalSeconds) * 1000;
@@ -2849,6 +3262,132 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
         _playtimeTrackerService.FlushIfDue(Config.PlaytimeTracking);
         SchedulePlaytimeFlush();
+    }
+
+    private void ScheduleSafezoneHealthDrain()
+    {
+        int token = _safezoneHealthDrainToken;
+        Schedule(() => RunSafezoneHealthDrain(token), SafezoneHealthDrainIntervalMs);
+    }
+
+    private void RunSafezoneHealthDrain(int token)
+    {
+        if (!ReferenceEquals(Instance, this) || token != _safezoneHealthDrainToken)
+        {
+            return;
+        }
+
+        if (_warmupActive
+            && Config.SurfaceEscapeSafezoneHealthDrainEnabled
+            && Config.SurfaceEscapeSafezoneHealthDrainPercentPerSecond > 0f)
+        {
+            float drainFraction = Config.SurfaceEscapeSafezoneHealthDrainPercentPerSecond / 100f;
+            foreach (Player player in Player.List.Where(player => IsManagedHuman(player) && IsInEscapeSafezone(player)))
+            {
+                if (!player.IsAlive)
+                {
+                    continue;
+                }
+
+                float maxHealth = Math.Max(1f, player.MaxHealth);
+                float drain = maxHealth * drainFraction;
+                _safezoneDrainDamagePlayerIds.Add(player.PlayerId);
+                try
+                {
+                    player.Damage(
+                        drain,
+                        WarmupLocalization.T("Safezone health drain", "安全区生命流失"),
+                        string.Empty);
+                }
+                finally
+                {
+                    _safezoneDrainDamagePlayerIds.Remove(player.PlayerId);
+                }
+
+                SendSafezoneHealthDrainWarning(player);
+            }
+        }
+
+        ScheduleSafezoneHealthDrain();
+    }
+
+    private void SendSafezoneHealthDrainWarning(Player player)
+    {
+        if (!Config.SurfaceEscapeSafezoneHealthDrainWarningEnabled
+            || string.IsNullOrWhiteSpace(Config.SurfaceEscapeSafezoneHealthDrainWarningText))
+        {
+            return;
+        }
+
+        string percent = Config.SurfaceEscapeSafezoneHealthDrainPercentPerSecond.ToString("0.##");
+        string message = Config.SurfaceEscapeSafezoneHealthDrainWarningText.Replace("{percent}", percent);
+        if (!TrySendStackedHint(player, "warmup-safezone", message, 1.1f))
+        {
+            player.SendHint(message, 1.1f);
+        }
+    }
+
+    private static bool TrySendStackedHint(Player player, string key, string message, float durationSeconds)
+    {
+        try
+        {
+            Type? pluginType = AppDomain.CurrentDomain.GetAssemblies()
+                .Select(assembly => assembly.GetType("ScpslRatingTags.RatingTagsPlugin", throwOnError: false))
+                .FirstOrDefault(type => type != null);
+            MethodInfo? method = pluginType?.GetMethod(
+                "TryShowStackedHint",
+                BindingFlags.Public | BindingFlags.Static,
+                null,
+                new[] { typeof(Player), typeof(string), typeof(string), typeof(float) },
+                null);
+
+            return method != null
+                && method.Invoke(null, new object[] { player, key, message, durationSeconds }) is true;
+        }
+        catch (Exception ex)
+        {
+            ApiLogger.Warn($"[WarmupSandbox] RatingTags stacked hint bridge failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    private void ScheduleDangerousItemProtectionMonitor()
+    {
+        int token = _dangerousItemProtectionMonitorToken;
+        Schedule(() => RunDangerousItemProtectionMonitor(token), DangerousItemProtectionMonitorIntervalMs);
+    }
+
+    private void RunDangerousItemProtectionMonitor(int token)
+    {
+        if (!ReferenceEquals(Instance, this) || token != _dangerousItemProtectionMonitorToken)
+        {
+            return;
+        }
+
+        if (_warmupActive)
+        {
+            foreach (Player player in Player.List.Where(IsManagedHuman))
+            {
+                if (IsChargingOrFiringMicroHid(player))
+                {
+                    TrimSpawnProtectionForDangerousItemUse(player);
+                }
+            }
+        }
+
+        ScheduleDangerousItemProtectionMonitor();
+    }
+
+    private static bool IsChargingOrFiringMicroHid(Player player)
+    {
+        if (player.CurrentItem is not MicroHIDItem microHid)
+        {
+            return false;
+        }
+
+        return microHid.Phase is MicroHidPhase.WindingUp
+            or MicroHidPhase.WoundUpSustain
+            or MicroHidPhase.Firing;
     }
 
     private void ScheduleLiveUpdateSignalPoll()
@@ -2971,8 +3510,9 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     private void ScheduleHelpReminderBroadcast(int generation)
     {
-        if (!Config.PlayerPanelEnabled
-            || !Config.BroadcastHelpReminder
+        bool canBroadcastHelp = Config.PlayerPanelEnabled && Config.BroadcastHelpReminder;
+        bool canBroadcastCommunity = Config.BroadcastCommunityReminder && !string.IsNullOrWhiteSpace(Config.CommunityReminderText);
+        if ((!canBroadcastHelp && !canBroadcastCommunity)
             || Config.HelpReminderIntervalSeconds <= 0
             || Config.HelpReminderDurationSeconds <= 0)
         {
@@ -2986,18 +3526,33 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     private void RunHelpReminderBroadcast(int generation)
     {
-        if (!IsCurrentGeneration(generation) || !_warmupActive || !Config.PlayerPanelEnabled)
+        if (!IsCurrentGeneration(generation) || !_warmupActive)
         {
             return;
         }
 
-        string text = WarmupLocalization.T(
-            "<size=28><color=#00ffff><b>Warmup controls</b></color></size>\n<size=22>Open Server Specific Settings for the bot console</size>",
-            "<size=28><color=#00ffff><b>热身控制</b></color></size>\n<size=22>打开服务器专属设置（Server Specific Settings）使用人机控制台</size>");
+        bool canBroadcastHelp = Config.PlayerPanelEnabled && Config.BroadcastHelpReminder;
+        bool canBroadcastCommunity = Config.BroadcastCommunityReminder && !string.IsNullOrWhiteSpace(Config.CommunityReminderText);
+        if (!canBroadcastHelp && !canBroadcastCommunity)
+        {
+            return;
+        }
+
+        bool sendCommunity = canBroadcastCommunity && (_nextHelpReminderIsCommunity || !canBroadcastHelp);
+        string text = sendCommunity
+            ? Config.CommunityReminderText.Trim()
+            : WarmupLocalization.T(
+                "<size=28><color=#00ffff><b>Warmup controls</b></color></size>\n<size=22>Open Server Specific Settings for the bot console</size>",
+                "<size=28><color=#00ffff><b>热身控制</b></color></size>\n<size=22>打开服务器专属设置（Server Specific Settings）使用人机控制台</size>");
 
         foreach (Player player in Player.List.Where(IsManagedHuman))
         {
-            player.SendBroadcast(text, Config.HelpReminderDurationSeconds, global::Broadcast.BroadcastFlags.Normal, true);
+            SendNonUpdateBroadcast(player, text, Config.HelpReminderDurationSeconds);
+        }
+
+        if (canBroadcastHelp && canBroadcastCommunity)
+        {
+            _nextHelpReminderIsCommunity = !sendCommunity;
         }
 
         ScheduleHelpReminderBroadcast(generation);
@@ -3499,6 +4054,136 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
     }
 
+    private void EnsureEscapeSafezoneVisuals()
+    {
+        bool hasWalls = _escapeSafezoneVisuals.Any(toy => toy != null && !toy.IsDestroyed);
+        bool hasLabels = _escapeSafezoneLabels.Any(toy => toy != null && !toy.IsDestroyed);
+        if (hasWalls && hasLabels)
+        {
+            return;
+        }
+
+        DestroyEscapeSafezoneVisuals();
+
+        switch (Config.SurfaceEscapeSafezoneAxis.Trim().ToLowerInvariant())
+        {
+            case "x":
+                CreateEscapeSafezoneWall(
+                    new Vector3(Config.SurfaceEscapeSafezoneMaxZ, 295f, 0f),
+                    new Vector3(0.08f, 36f, 260f));
+                CreateEscapeSafezoneWall(
+                    new Vector3(Config.SurfaceEscapeSafezoneMaxZ + 0.1f, 295f, 0f),
+                    new Vector3(0.08f, 36f, 260f));
+                CreateEscapeSafezoneLabel(
+                    new Vector3(Config.SurfaceEscapeSafezoneMaxZ + 0.18f, 300f, 0f),
+                    Quaternion.Euler(0f, 90f, 0f));
+                CreateEscapeSafezoneLabel(
+                    new Vector3(Config.SurfaceEscapeSafezoneMaxZ - 0.18f, 300f, 0f),
+                    Quaternion.Euler(0f, -90f, 0f));
+                break;
+
+            case "y":
+                CreateEscapeSafezoneWall(
+                    new Vector3(125f, Config.SurfaceEscapeSafezoneMaxZ, 0f),
+                    new Vector3(260f, 0.08f, 260f));
+                CreateEscapeSafezoneWall(
+                    new Vector3(125f, Config.SurfaceEscapeSafezoneMaxZ + 0.1f, 0f),
+                    new Vector3(260f, 0.08f, 260f));
+                CreateEscapeSafezoneLabel(
+                    new Vector3(125f, Config.SurfaceEscapeSafezoneMaxZ + 0.18f, 0f),
+                    Quaternion.Euler(90f, 0f, 0f));
+                CreateEscapeSafezoneLabel(
+                    new Vector3(125f, Config.SurfaceEscapeSafezoneMaxZ - 0.18f, 0f),
+                    Quaternion.Euler(-90f, 0f, 0f));
+                break;
+
+            default:
+                float minX = Config.SurfaceEscapeSafezoneMinX;
+                float maxX = 260f;
+                float width = Mathf.Max(1f, maxX - minX);
+                float centerX = minX + (width * 0.5f);
+                CreateEscapeSafezoneWall(
+                    new Vector3(centerX, 295f, Config.SurfaceEscapeSafezoneMaxZ - 0.05f),
+                    new Vector3(width, 36f, 0.08f));
+                CreateEscapeSafezoneWall(
+                    new Vector3(centerX, 295f, Config.SurfaceEscapeSafezoneMaxZ + 0.05f),
+                    new Vector3(width, 36f, 0.08f));
+                CreateEscapeSafezoneLabelColumn(
+                    new Vector3(136.45f, 295.8f, -16.86f),
+                    Quaternion.identity);
+                break;
+        }
+
+        ApiLogger.Info($"[{Name}] Escape safezone visuals created walls={_escapeSafezoneVisuals.Count} labels={_escapeSafezoneLabels.Count} axis={Config.SurfaceEscapeSafezoneAxis} threshold={Config.SurfaceEscapeSafezoneMaxZ} minX={Config.SurfaceEscapeSafezoneMinX}");
+    }
+
+    private void CreateEscapeSafezoneWall(Vector3 position, Vector3 scale)
+    {
+        PrimitiveObjectToyWrapper wall = PrimitiveObjectToyWrapper.Create(
+            position,
+            Quaternion.identity,
+            scale,
+            parent: null,
+            networkSpawn: false);
+        wall.Type = PrimitiveType.Cube;
+        wall.Flags = PrimitiveFlags.Visible;
+        wall.Color = new Color(0.25f, 0.85f, 1f, 0.35f);
+        wall.IsStatic = true;
+        wall.SyncInterval = 0f;
+        wall.Spawn();
+        _escapeSafezoneVisuals.Add(wall);
+    }
+
+    private void CreateEscapeSafezoneLabel(Vector3 position, Quaternion rotation)
+    {
+        TextToyWrapper label = TextToyWrapper.Create(
+            position,
+            rotation,
+            new Vector3(0.32f, 0.32f, 0.32f),
+            parent: null,
+            networkSpawn: false);
+        label.TextFormat = "<alpha=#FF><b><color=#00FFFFFF><nobr>安全区</nobr></color></b>";
+        label.DisplaySize = new Vector2(80f, 4f);
+        label.IsStatic = true;
+        label.SyncInterval = 0f;
+        label.Spawn();
+        _escapeSafezoneLabels.Add(label);
+    }
+
+    private void CreateEscapeSafezoneLabelColumn(Vector3 centerPosition, Quaternion rotation)
+    {
+        const float VerticalSpacing = 0.6f;
+        CreateEscapeSafezoneLabel(centerPosition + Vector3.up * VerticalSpacing, rotation);
+        CreateEscapeSafezoneLabel(centerPosition, rotation);
+        CreateEscapeSafezoneLabel(centerPosition - Vector3.up * VerticalSpacing, rotation);
+    }
+
+    private void DestroyEscapeSafezoneVisuals()
+    {
+        DestroyDebugToys(_escapeSafezoneVisuals);
+        _escapeSafezoneVisuals.Clear();
+        DestroyTextToys(_escapeSafezoneLabels);
+        _escapeSafezoneLabels.Clear();
+    }
+
+    private static void DestroyTextToys(IEnumerable<TextToyWrapper> toys)
+    {
+        foreach (TextToyWrapper toy in toys.Where(toy => toy != null))
+        {
+            try
+            {
+                if (!toy.IsDestroyed)
+                {
+                    toy.Destroy();
+                }
+            }
+            catch (Exception)
+            {
+                // Best-effort cleanup during plugin reload/restart.
+            }
+        }
+    }
+
     private void DestroyLegacyArenaDebugToys()
     {
         Vector3 arenaOrigin = Config.Dust2Map.Origin.ToVector3();
@@ -3661,7 +4346,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     public string BuildStatus()
     {
-        return $"active={_warmupActive}, roundStarted={Round.IsRoundStarted}, bots={_managedBots.Count}/{Config.BotCount}, maxBots={Config.MaxBotCount}, humanRole={Config.HumanRole}, botRole={Config.BotRole}, humanRespawnMs={Config.HumanRespawnDelayMs}, botRespawnMs={Config.BotRespawnDelayMs}, difficulty={Config.DifficultyPreset}, aimode={Config.BotBehavior.AiMode}, scpSpeeds=(939:{Config.BotBehavior.FacilityDummyFollowSpeedScp939:F1},3114:{Config.BotBehavior.FacilityDummyFollowSpeedScp3114:F1},049:{Config.BotBehavior.FacilityDummyFollowSpeedScp049:F1},106:{Config.BotBehavior.FacilityDummyFollowSpeedScp106:F1}), bombMode=({_bombModeService.BuildStatus()}), dust2=({_dust2MapService.BuildStatus(Config.Dust2Map)}), facilityNav=({_facilityNavMeshService.BuildStatus(Config.BotBehavior)})";
+        return $"active={_warmupActive}, roundStarted={Round.IsRoundStarted}, bots={_managedBots.Count}/{Config.BotCount}, maxBots={Config.MaxBotCount}, maxPlayerBots={GetPlayerBotCountLimit()}, humanRole={Config.HumanRole}, botRole={Config.BotRole}, humanRespawnMs={Config.HumanRespawnDelayMs}, botRespawnMs={Config.BotRespawnDelayMs}, difficulty={Config.DifficultyPreset}, aimode={Config.BotBehavior.AiMode}, scpSpeeds=(939:{Config.BotBehavior.FacilityDummyFollowSpeedScp939:F1},3114:{Config.BotBehavior.FacilityDummyFollowSpeedScp3114:F1},049:{Config.BotBehavior.FacilityDummyFollowSpeedScp049:F1},106:{Config.BotBehavior.FacilityDummyFollowSpeedScp106:F1}), bombMode=({_bombModeService.BuildStatus()}), dust2=({_dust2MapService.BuildStatus(Config.Dust2Map)}), facilityNav=({_facilityNavMeshService.BuildStatus(Config.BotBehavior)})";
     }
 
     public bool StartRoundIfNeeded(out string response)
@@ -3704,7 +4389,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         _warmupActive = false;
         CleanupManagedBots();
         _bombModeService.ResetRuntime();
-        CleanupArenaMap(returnHumansToFacility: true);
+        CleanupArenaMap(returnHumansToFacility: false);
         response = "Warmup stopped and all managed bots were removed.";
         return true;
     }
@@ -3763,6 +4448,8 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             : message.Trim();
         string broadcastText = $"<size=28><color=#ffff00>{finalMessage}</color></size>";
         ushort broadcastDuration = (ushort)Math.Min(ushort.MaxValue, Math.Max(5, duration));
+        int warningMs = (int)Math.Min(int.MaxValue / 2L, Math.Max(1000L, (long)duration * 1000L));
+        _liveUpdateWarningUntilTick = unchecked(Environment.TickCount + warningMs);
         int sent = 0;
 
         foreach (Player player in Player.List)
@@ -3772,6 +4459,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                 continue;
             }
 
+            player.ClearBroadcasts();
             player.SendBroadcast(broadcastText, broadcastDuration, global::Broadcast.BroadcastFlags.Normal, true);
             sent++;
         }
@@ -3779,6 +4467,21 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         response = $"Live update restart warning sent to {sent} player(s).";
         ApiLogger.Info($"[{Name}] {response} seconds={duration} message={finalMessage}");
         return true;
+    }
+
+    private bool IsLiveUpdateWarningActive()
+    {
+        return unchecked(_liveUpdateWarningUntilTick - Environment.TickCount) > 0;
+    }
+
+    private void SendNonUpdateBroadcast(Player player, string text, ushort duration)
+    {
+        if (IsLiveUpdateWarningActive())
+        {
+            return;
+        }
+
+        player.SendBroadcast(text, duration, global::Broadcast.BroadcastFlags.Normal, true);
     }
 
     public bool TryPlayerSetBotCount(Player player, string value, out string response)
@@ -3791,11 +4494,12 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             return false;
         }
 
-        if (botCount > Config.MaxBotCount)
+        int playerBotCountLimit = GetPlayerBotCountLimit();
+        if (botCount > playerBotCountLimit)
         {
             response = WarmupLocalization.T(
-                $"Bot count cannot exceed {Config.MaxBotCount}.",
-                $"机器人数量不能超过 {Config.MaxBotCount}。");
+                $"Bot count cannot exceed {playerBotCountLimit}.",
+                $"机器人数量不能超过 {playerBotCountLimit}。");
             return false;
         }
 
@@ -3870,11 +4574,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
 
         _playerPanelBotTargetIds = botTargetIds;
-        NamedLoadoutDefinition[] presets = GetHumanLoadoutPresets();
-        string[] loadoutOptions = presets.Length == 0
-            ? new[] { "Default" }
-            : presets.Select(preset => preset.Name).ToArray();
-        int panelMaxBotCount = Math.Max(0, Config.MaxBotCount);
+        int panelMaxBotCount = GetPlayerBotCountLimit();
         int defaultBotCount = ClampPanelBotCount(Config.BotCount);
         int defaultDifficulty = Math.Max(0, Array.IndexOf(PlayerPanelDifficulties, Config.DifficultyPreset));
         int defaultAiMode = Math.Max(0, Array.IndexOf(PlayerPanelAiModes, Config.BotBehavior.AiMode));
@@ -3890,19 +4590,8 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                     "Pick a value, then press Apply. Personal: 3 free actions, then 5s. Global: shared cooldown.",
                     "先选数值，再点应用。个人前 3 次无冷却，之后 5 秒；全局共享冷却。"),
                 TMPro.TextAlignmentOptions.Left),
-            new SSGroupHeader(WarmupLocalization.T("Personal Controls", "个人功能"), false, WarmupLocalization.T("First 3 actions are free, then 5s cooldown.", "前 3 次无冷却，之后 5 秒冷却。")),
-            new SSDropdownSetting(PlayerPanelRoleSettingId, WarmupLocalization.T("My Role", "我的阵营"), PlayerPanelRoles.Select(role => role.ToString()).ToArray(), 0, SSDropdownSetting.DropdownEntryType.HybridLoop, WarmupLocalization.T("Set role. Spectators use the default spawnpoint.", "设置阵营。旁观者会使用默认出生点。"), 0, false),
-            new SSButton(PlayerPanelSetRoleButtonId, WarmupLocalization.T("Apply My Role", "应用阵营"), WarmupLocalization.T("APPLY", "应用"), null, WarmupLocalization.T("Apply role.", "应用阵营。")),
-            new SSDropdownSetting(PlayerPanelLoadoutSettingId, WarmupLocalization.T("My Loadout", "我的预设"), loadoutOptions, 0, SSDropdownSetting.DropdownEntryType.HybridLoop, WarmupLocalization.T("Loadout preset.", "预设。"), 0, false),
-            new SSButton(PlayerPanelApplyLoadoutButtonId, WarmupLocalization.T("Apply Loadout", "应用预设"), WarmupLocalization.T("APPLY", "应用"), null, WarmupLocalization.T("Apply loadout.", "应用预设。")),
-            new SSDropdownSetting(PlayerPanelItemSettingId, WarmupLocalization.T("Give Item", "给物品"), PlayerPanelItems.Select(item => item.ToString()).ToArray(), 0, SSDropdownSetting.DropdownEntryType.HybridLoop, WarmupLocalization.T("Item to give yourself.", "给自己的物品。"), 0, false),
-            new SSButton(PlayerPanelGiveItemButtonId, WarmupLocalization.T("Apply Item", "应用物品"), WarmupLocalization.T("GIVE", "给予"), null, WarmupLocalization.T("Give item.", "给予物品。")),
-            new SSDropdownSetting(PlayerPanelTeleportTargetSettingId, WarmupLocalization.T("Teleport Target", "传送目标"), targetOptions, 0, SSDropdownSetting.DropdownEntryType.HybridLoop, WarmupLocalization.T("Includes bots.", "包含机器人。"), 0, false),
-            new SSButton(PlayerPanelGotoButtonId, WarmupLocalization.T("Apply Teleport", "应用传送"), WarmupLocalization.T("GO", "传送"), null, WarmupLocalization.T("Teleport to target.", "传送到目标。")),
-            new SSDropdownSetting(PlayerPanelRoomPresetSettingId, WarmupLocalization.T("Preset Room", "预设房间"), PlayerPanelRoomPresets.Select(preset => preset.Label).ToArray(), 0, SSDropdownSetting.DropdownEntryType.HybridLoop, WarmupLocalization.T("Teleport to a common facility room if it exists this round.", "传送到本局存在的常用设施房间。"), 0, false),
-            new SSButton(PlayerPanelRoomTeleportButtonId, WarmupLocalization.T("Apply Room Teleport", "应用房间传送"), WarmupLocalization.T("ROOM TP", "房间传送"), null, WarmupLocalization.T("Teleport to selected room.", "传送到选择的房间。")),
+            new SSGroupHeader(WarmupLocalization.T("Bot Controls", "机器人功能"), false, WarmupLocalization.T("Only bots are changed.", "只修改机器人。")),
             new SSButton(PlayerPanelBringBotsButtonId, WarmupLocalization.T("Bring Bots", "召回机器人"), WarmupLocalization.T("BRING", "召回"), null, WarmupLocalization.T("Bring bots to you.", "将机器人召回到你身边。")),
-            new SSGroupHeader(WarmupLocalization.T("Global Controls", "全局功能"), false, WarmupLocalization.T("Shared cooldown.", "共享冷却。")),
             new SSSliderSetting(PlayerPanelBotCountSettingId, WarmupLocalization.T("Bot Count", "机器人数量"), 0, panelMaxBotCount, defaultBotCount, true, "0", "{0}", WarmupLocalization.T($"0-{panelMaxBotCount} bots.", $"0-{panelMaxBotCount} 个。"), 0, false),
             new SSButton(PlayerPanelSetBotsButtonId, WarmupLocalization.T("Apply Bot Count", "应用数量"), WarmupLocalization.T("APPLY", "应用"), null, WarmupLocalization.T("Apply bot count.", "应用数量。")),
             new SSDropdownSetting(PlayerPanelDifficultySettingId, WarmupLocalization.T("Difficulty", "难度"), PlayerPanelDifficulties.Select(difficulty => difficulty.ToString()).ToArray(), defaultDifficulty, SSDropdownSetting.DropdownEntryType.HybridLoop, WarmupLocalization.T("Bot difficulty.", "机器人难度。"), 0, false),
@@ -4126,41 +4815,17 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         switch (action)
         {
             case "role":
-                RoleTypeId role = _playerPanelSelectedRoles.TryGetValue(actor.PlayerId, out RoleTypeId selectedRole)
-                    ? selectedRole
-                    : PlayerPanelRoles.FirstOrDefault();
-                TryPanelSetRole(actor, actor, role, out _);
-                break;
-
             case "loadout":
-                string loadout = _playerPanelSelectedLoadouts.TryGetValue(actor.PlayerId, out string? selectedLoadout)
-                    ? selectedLoadout
-                    : GetHumanLoadoutPresets().FirstOrDefault()?.Name ?? "Default";
-                TrySelectHumanLoadout(actor, loadout, applyNow: true, out string loadoutResponse);
-                actor.SendHint(loadoutResponse, 4f);
-                break;
-
             case "give":
-                ItemType item = _playerPanelSelectedItems.TryGetValue(actor.PlayerId, out ItemType selectedItem)
-                    ? selectedItem
-                    : PlayerPanelItems.FirstOrDefault();
-                TryPanelGive(actor, actor, item, out _);
-                break;
-
             case "goto":
-                Player target = ResolveSelectedPanelTarget(actor);
-                TryPanelGoto(actor, target, out _);
+            case "roomtp":
+                actor.SendHint(WarmupLocalization.T(
+                    "Player role, loadout, item, and teleport controls are disabled in bot-only mode.",
+                    "仅机器人模式已禁用玩家阵营、预设、物品和传送功能。"), 4f);
                 break;
 
             case "bringbots":
                 TryPanelBringBots(actor, GetSelectedPanelBotTargetId(actor), out _);
-                break;
-
-            case "roomtp":
-                RoomName roomName = _playerPanelSelectedRoomPresets.TryGetValue(actor.PlayerId, out RoomName selectedRoomName)
-                    ? selectedRoomName
-                    : PlayerPanelRoomPresets.FirstOrDefault().RoomName;
-                TryPanelTeleportToRoom(actor, roomName, out _);
                 break;
 
         }
@@ -4680,7 +5345,12 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     private int ClampPanelBotCount(int count)
     {
-        return ClampBotCount(count);
+        return ClampPlayerBotCount(count);
+    }
+
+    private int GetPlayerBotCountLimit()
+    {
+        return Math.Min(Math.Max(0, Config.MaxPlayerBotCount), Math.Max(0, Config.MaxBotCount));
     }
 
     private void ClampSelectedPlayerPanelBotCounts()
@@ -4857,6 +5527,22 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                 response = $"Max bot count set to {Config.MaxBotCount}. Current bot count is {Config.BotCount}.";
                 return true;
 
+            case "maxplayerbots":
+            case "maxplayerbotcount":
+            case "playermaxbots":
+            case "playermaxbotcount":
+                if (!int.TryParse(value, out int maxPlayerBotCount) || maxPlayerBotCount < 0)
+                {
+                    response = "Max player bot count must be a non-negative integer.";
+                    return false;
+                }
+
+                Config.MaxPlayerBotCount = maxPlayerBotCount;
+                ClampSelectedPlayerPanelBotCounts();
+                RefreshPlayerPanelSettings(sendToPlayers: true);
+                response = $"Max player bot count set to {GetPlayerBotCountLimit()} (configured {Config.MaxPlayerBotCount}, admin max {Config.MaxBotCount}).";
+                return true;
+
             case "humanrespawn":
             case "respawn":
             case "humanrespawnms":
@@ -4929,25 +5615,13 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
                 return true;
 
             case "forceroundstart":
-                if (!bool.TryParse(value, out bool forceRoundStart))
-                {
-                    response = "forceroundstart must be true or false.";
-                    return false;
-                }
-
-                Config.ForceRoundStartOnFirstPlayer = forceRoundStart;
-                response = $"ForceRoundStartOnFirstPlayer set to {Config.ForceRoundStartOnFirstPlayer}.";
+                Config.ForceRoundStartOnFirstPlayer = false;
+                response = "ForceRoundStartOnFirstPlayer is disabled in bot-only mode.";
                 return true;
 
             case "suppressroundend":
-                if (!bool.TryParse(value, out bool suppressRoundEnd))
-                {
-                    response = "suppressroundend must be true or false.";
-                    return false;
-                }
-
-                Config.SuppressRoundEnd = suppressRoundEnd;
-                response = $"SuppressRoundEnd set to {Config.SuppressRoundEnd}.";
+                Config.SuppressRoundEnd = false;
+                response = "SuppressRoundEnd is disabled in bot-only mode.";
                 return true;
 
             case "mode":
@@ -5115,7 +5789,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
         if (!enabled)
         {
-            CleanupArenaMap(returnHumansToFacility: true);
+            CleanupArenaMap(returnHumansToFacility: false);
         }
 
         response = enabled
@@ -5433,7 +6107,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         {
             foreach (Player player in participants)
             {
-                player.SendBroadcast(resultText, 6, global::Broadcast.BroadcastFlags.Normal, true);
+                SendNonUpdateBroadcast(player, resultText, 6);
             }
         }
 

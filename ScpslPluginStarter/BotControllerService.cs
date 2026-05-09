@@ -87,6 +87,7 @@ internal sealed class BotControllerService
         Action<Player, ManagedBotState, string> logNavDebug,
         Func<Player, ManagedBotState, Player?, bool, bool> updateFacilityFollower,
         Action<Player, ManagedBotState, BotTargetSelection?> updateZoomHold,
+        Func<Player, bool>? isProtectedTarget,
         int brainToken,
         int generation)
     {
@@ -95,7 +96,7 @@ internal sealed class BotControllerService
 
         FirearmItem? firearm = _combatService.EnsureFirearmEquipped(bot);
         bool canUseScpAttack = BotCombatService.IsSupportedScpAttacker(bot.Role);
-        BotTargetSelection? target = _targetingService.SelectTarget(bot, state, players, behavior, random);
+        BotTargetSelection? target = _targetingService.SelectTarget(bot, state, players, behavior, random, isProtectedTarget);
         bool shouldCloseRetreat = UpdateCloseRetreatState(bot, state, target, behavior, canUseScpAttack);
         bool closeRetreatLockActive = IsCloseRetreatLockActive(state, nowTick) || shouldCloseRetreat;
         if (shouldCloseRetreat)

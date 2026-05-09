@@ -10,7 +10,7 @@
 
   <PropertyGroup>
     <ScpslServerManagedDir>C:\Program Files (x86)\Steam\steamapps\common\SCP Secret Laboratory Dedicated Server\SCPSL_Data\Managed</ScpslServerManagedDir>
-    <LabApiGlobalPluginsDir>$(APPDATA)\SCP Secret Laboratory\LabAPI\plugins\global</LabApiGlobalPluginsDir>
+    <LabApiPortPluginsDir>$(APPDATA)\SCP Secret Laboratory\LabAPI\plugins\7777</LabApiPortPluginsDir>
     <ProjectMerSchematicsDir>$(APPDATA)\SCP Secret Laboratory\LabAPI\configs\ProjectMER\Schematics</ProjectMerSchematicsDir>
   </PropertyGroup>
 
@@ -62,8 +62,8 @@
   </ItemGroup>
 
   <Target Name="DeployToLabApi" AfterTargets="Build">
-    <MakeDir Directories="$(LabApiGlobalPluginsDir)" />
-    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(LabApiGlobalPluginsDir)" SkipUnchangedFiles="false" />
+    <MakeDir Directories="$(LabApiPortPluginsDir)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(LabApiPortPluginsDir)" SkipUnchangedFiles="false" />
     <MakeDir Directories="$(ProjectMerSchematicsDir)\de_dust2" />
     <ItemGroup>
       <Dust2SchematicFiles Include="Schematics\de_dust2\**\*" />
