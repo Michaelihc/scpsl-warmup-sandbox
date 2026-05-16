@@ -1,0 +1,11 @@
+Repkins navigation port
+
+The facility mesh navigation and FPC motor movement adapter in this folder are
+ported from repkins/scpsl-bot-plugin:
+
+https://github.com/repkins/scpsl-bot-plugin
+
+Original author credit: repkins(19).
+
+The local upstream clone did not include a license file. Keep this notice with
+any copied or adapted navigation files so provenance stays visible.

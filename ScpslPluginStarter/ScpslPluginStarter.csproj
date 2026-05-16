@@ -15,11 +15,18 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Lib.Harmony" Version="2.3.6" />
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net48" Version="1.0.3" PrivateAssets="All" />
   </ItemGroup>
 
   <ItemGroup>
     <EmbeddedResource Include="NavTemplates\*.json" />
+    <Content Include="RepkinsNavigation\navmesh.slnmf">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <None Include="RepkinsNavigation\NOTICE.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
   <ItemGroup>
@@ -68,6 +75,13 @@
   <Target Name="DeployToLabApi" AfterTargets="Build">
     <MakeDir Directories="$(LabApiPortPluginsDir)" />
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(LabApiPortPluginsDir)" SkipUnchangedFiles="false" />
+    <ItemGroup>
+      <HarmonyDependency Include="@(ReferenceCopyLocalPaths)" Condition="'%(ReferenceCopyLocalPaths.Filename)' == '0Harmony'" />
+      <RepkinsNavigationFiles Include="RepkinsNavigation\navmesh.slnmf;RepkinsNavigation\NOTICE.txt" />
+    </ItemGroup>
+    <Copy SourceFiles="@(HarmonyDependency)" DestinationFolder="$(LabApiPortPluginsDir)" SkipUnchangedFiles="true" />
+    <MakeDir Directories="$(LabApiPortPluginsDir)\ScpslPluginStarter" />
+    <Copy SourceFiles="@(RepkinsNavigationFiles)" DestinationFiles="@(RepkinsNavigationFiles->'$(LabApiPortPluginsDir)\ScpslPluginStarter\%(Filename)%(Extension)')" SkipUnchangedFiles="false" />
     <MakeDir Directories="$(ProjectMerSchematicsDir)\de_dust2" />
     <ItemGroup>
       <Dust2SchematicFiles Include="Schematics\de_dust2\**\*" />

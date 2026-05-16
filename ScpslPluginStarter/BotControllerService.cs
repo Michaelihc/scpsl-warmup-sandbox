@@ -4,7 +4,10 @@ using System.Linq;
 using CustomPlayerEffects;
 using LabApi.Features.Wrappers;
 using MapGeneration;
+using Mirror;
 using PlayerRoles;
+using PlayerRoles.FirstPersonControl;
+using ScpslPluginStarter.RepkinsNavigation;
 using UnityEngine;
 using UnityEngine.AI;
 
@@ -15,7 +18,7 @@ internal sealed class BotControllerService
     private const int CampDurationMs = 30000;
     private const int CampCooldownMs = 30000;
     private const int MinimumForwardJumpIntervalMs = 1000;
-    private const int RelevantDoorCacheMs = 1500;
+    private const int RelevantDoorCacheMs = 3000;
     private const int SustainedStuckRoomTeleportMs = 10000;
     private const int SustainedStuckRoomTeleportCooldownMs = 10000;
     private const int OutOfBoundsRecoveryCooldownMs = 1000;
@@ -27,6 +30,12 @@ internal sealed class BotControllerService
     private const float OrbitInwardBias = 0.12f;
     private const float OrbitDistanceScaleMin = 0.7f;
     private const float SeparationWeight = 1.1f;
+    private const int LocalAvoidanceHoldMs = 1600;
+    private const int LocalAvoidanceLogIntervalMs = 500;
+    private const int LocalAvoidanceTurnHoldMs = 2000;
+    private const int LocalAvoidanceTurnIntervalMs = 250;
+    private const float LocalAvoidanceTurnStepDegrees = 10.0f;
+    private const float LocalAvoidanceBackwardFlipProgress = 0.35f;
     private const float CampExitDistanceBuffer = 0.1f;
     private const float ReactiveStrafeFlipMinMs = 45f;
     private const float ReactiveStrafeFlipMaxMs = 120f;
@@ -39,6 +48,34 @@ internal sealed class BotControllerService
     private const int CloseRetreatLockMs = 450;
     private const int NavMeshStuckNudgeLoopWindowMs = 6000;
     private const int NavMeshStuckNudgeLoopEscalationCount = 4;
+    private const int RoomGraphBlockedSegmentMemoryMs = 2500;
+    private const float RoomGraphBlockedSegmentMatchDistance = 0.9f;
+    private const float RoomGraphBlockedSegmentVerticalTolerance = 1.4f;
+    private const float LocalCylinderSkin = 0.06f;
+    private const float LocalCylinderBottom = 0.48f;
+    private const float LocalCylinderTop = 1.55f;
+
+    private readonly struct LocalObstacleAvoidance
+    {
+        public LocalObstacleAvoidance(Vector3 point, Vector3 away, Vector3 tangent, int preferredSide, float distance)
+        {
+            Point = point;
+            Away = away;
+            Tangent = tangent;
+            PreferredSide = preferredSide;
+            Distance = distance;
+        }
+
+        public Vector3 Point { get; }
+
+        public Vector3 Away { get; }
+
+        public Vector3 Tangent { get; }
+
+        public int PreferredSide { get; }
+
+        public float Distance { get; }
+    }
 
     private readonly BotNavigationService _navigationService = new();
     private readonly BotTargetingService _targetingService = new();
@@ -58,6 +95,16 @@ internal sealed class BotControllerService
     public int GetArenaWaypointCount()
     {
         return _navigationService.GetArenaWaypointCount();
+    }
+
+    public string RebuildFacilityRoomGraph(BotBehaviorDefinition behavior)
+    {
+        return _navigationService.RebuildFacilityRoomGraph(behavior);
+    }
+
+    public IReadOnlyList<Vector3> GetFacilityRoomGraphDebugNodes(int maxNodes)
+    {
+        return _navigationService.GetFacilityRoomGraphDebugNodes(maxNodes);
     }
 
     public static int GetCampCooldownMs()
@@ -101,7 +148,15 @@ internal sealed class BotControllerService
             return;
         }
 
-        TryRecoverOutOfBoundsPosition(bot, state, behavior, useDust2Arena, nowTick, logNavDebug);
+        if (useDust2Arena || !behavior.UseFacilityRoomGraphNavigation)
+        {
+            TryRecoverOutOfBoundsPosition(bot, state, behavior, useDust2Arena, nowTick, logNavDebug);
+        }
+
+        if (useDust2Arena || !behavior.UseRepkinsFacilityNavigation)
+        {
+            RepkinsFpcMovementRegistry.Disable(bot);
+        }
 
         FirearmItem? firearm = _combatService.EnsureFirearmEquipped(bot);
         bool shouldCloseRetreat = UpdateCloseRetreatState(bot, state, target, behavior, canUseScpAttack);
@@ -124,7 +179,7 @@ internal sealed class BotControllerService
             TriggerMovementStallJumpIfReady(bot, state, behavior, tryInvokeDummyActions, logNavDebug, nowTick);
             if (!closeRetreatLockActive)
             {
-                MaybeForceNavigationRepathOnStuck(bot, state, behavior, allowFacilityDoorTeleport: !useDust2Arena, tryInvokeDummyActions, logNavDebug, nowTick);
+                MaybeForceNavigationRepathOnStuck(bot, state, behavior, allowFacilityDoorTeleport: !useDust2Arena && !behavior.UseRepkinsFacilityNavigation, tryInvokeDummyActions, logNavDebug, nowTick);
             }
             RefreshStrafe(state, random, nowTick);
             if (!TryPatrolWithoutTarget(
@@ -143,6 +198,8 @@ internal sealed class BotControllerService
                     nowTick))
             {
                 MaybeLogNavigationExecution(bot, state, null, behavior, useNavMesh, false, bot.Position, "no-target", logNavDebug, nowTick);
+                UpdateFacilityWaypointFollower(bot, state, behavior, false, logNavDebug);
+                RepkinsFpcMovementRegistry.Disable(bot);
                 StopWithoutTarget(state, nowTick);
             }
 
@@ -162,7 +219,7 @@ internal sealed class BotControllerService
         TriggerMovementStallJumpIfReady(bot, state, behavior, tryInvokeDummyActions, logNavDebug, nowTick);
         if (!closeRetreatLockActive)
         {
-            MaybeForceNavigationRepathOnStuck(bot, state, behavior, allowFacilityDoorTeleport: !useDust2Arena, tryInvokeDummyActions, logNavDebug, nowTick);
+            MaybeForceNavigationRepathOnStuck(bot, state, behavior, allowFacilityDoorTeleport: !useDust2Arena && !behavior.UseRepkinsFacilityNavigation, tryInvokeDummyActions, logNavDebug, nowTick);
         }
         RefreshStrafe(state, random, nowTick);
         EvaluateState(bot, state, target, behavior, random, nowTick);
@@ -254,6 +311,7 @@ internal sealed class BotControllerService
         bool shouldUseFacilityFollower = canMove
             && !closeRetreatLockActive
             && !useDust2Arena
+            && !behavior.UseFacilityRoomGraphNavigation
             && behavior.UseFacilityDummyFollowFallback
             && target != null
             && !hasLineOfSight
@@ -261,7 +319,26 @@ internal sealed class BotControllerService
         bool pausedAtDoor = canMove
             && !closeRetreatLockActive
             && TryHandleNearbyDoor(bot, state, behavior, navTarget, useDust2Arena, logNavDebug, nowTick);
-        bool facilityFollowerActive = updateFacilityFollower(bot, state, target?.Target, shouldUseFacilityFollower && !pausedAtDoor);
+        bool repkinsMovementActive = canMove
+            && !closeRetreatLockActive
+            && !useDust2Arena
+            && behavior.UseRepkinsFacilityNavigation
+            && hasActiveNavigation
+            && !pausedAtDoor
+            && TryApplyRepkinsFpcMovement(bot, state, behavior, target, navTarget, nowTick, logNavDebug);
+        bool facilityFollowerActive = updateFacilityFollower(bot, state, target?.Target, shouldUseFacilityFollower && !pausedAtDoor && !repkinsMovementActive);
+        bool facilityWaypointFollowerActive = UpdateFacilityWaypointFollower(
+            bot,
+            state,
+            behavior,
+            canMove
+                && !closeRetreatLockActive
+                && !useDust2Arena
+                && !repkinsMovementActive
+                && behavior.UseFacilityRoomGraphNavigation
+                && hasActiveNavigation
+                && !pausedAtDoor,
+            logNavDebug);
 
         bool canAttackNow = false;
         string? canAttackReason = null;
@@ -274,7 +351,7 @@ internal sealed class BotControllerService
             canAttackNow = _combatService.CanAttack(bot, state, target, activeBehavior, firearm, nowTick, out canAttackReason);
         }
 
-        if (state.AiState != BotAiState.Camp && !facilityFollowerActive && !pausedAtDoor)
+        if (state.AiState != BotAiState.Camp && !facilityFollowerActive && !facilityWaypointFollowerActive && !repkinsMovementActive && !pausedAtDoor)
         {
             if (TryApplyDirectNavMeshPositionControl(
                     bot,
@@ -292,8 +369,9 @@ internal sealed class BotControllerService
                 MoveBot(bot, state, players, behavior, useDust2Arena, target, navTarget, hasActiveNavigation, tryInvokeDummyActions, random, nowTick, canUseScpAttack, logNavDebug);
             }
         }
-        else
+        else if (!repkinsMovementActive)
         {
+            RepkinsFpcMovementRegistry.Disable(bot);
             ClearMoveIntent(state);
         }
 
@@ -454,10 +532,29 @@ internal sealed class BotControllerService
 
         if (TryHandleNearbyDoor(bot, state, behavior, navTarget, useDust2Arena, logNavDebug, nowTick))
         {
+            UpdateFacilityWaypointFollower(bot, state, behavior, false, logNavDebug);
             return true;
         }
 
         _aimService.AimAtPoint(bot, state, navTarget, behavior, tryInvokeDummyAction, NoAimLog);
+        if (!useDust2Arena
+            && behavior.UseFacilityRoomGraphNavigation
+            && hasActiveNavigation)
+        {
+            if (behavior.UseRepkinsFacilityNavigation
+                && TryApplyRepkinsFpcMovement(bot, state, behavior, null, navTarget, nowTick, logNavDebug))
+            {
+                return true;
+            }
+
+            if (UpdateFacilityWaypointFollower(bot, state, behavior, true, logNavDebug))
+            {
+                return true;
+            }
+
+            ClearMoveIntent(state);
+            return true;
+        }
 
         if (TryApplyForwardRecoverySidestep(bot, state, behavior, tryInvokeDummyActions, nowTick))
         {
@@ -788,7 +885,16 @@ internal sealed class BotControllerService
             purePathDirection.y = 0f;
             float navDistance = HorizontalDistance(bot.Position, navTarget);
             float navStepDistance = Mathf.Clamp(navDistance * 0.85f, 0.15f, behavior.NavMeshCornerMoveMaxStep);
-            if (TryMoveTowardDirection(bot, purePathDirection, behavior, tryInvokeDummyActions, allowBackward: false, out string pathMoveLabel, navStepDistance))
+            if (TryMoveTowardNavigationDirection(
+                    bot,
+                    state,
+                    purePathDirection,
+                    behavior,
+                    tryInvokeDummyActions,
+                    out string pathMoveLabel,
+                    navStepDistance,
+                    nowTick,
+                    logNavDebug))
             {
                 RecordMoveIntent(state, pathMoveLabel, nowTick);
                 MaybeTriggerForwardRecoveryJump(bot, state, behavior, tryInvokeDummyActions, nowTick, useScpForwardStrafe);
@@ -817,9 +923,27 @@ internal sealed class BotControllerService
             }
         }
 
+        if (!useDust2Arena
+            && behavior.UseFacilityRoomGraphNavigation
+            && string.Equals(state.LastNavigationReason, "room-graph-failed-stop", StringComparison.Ordinal))
+        {
+            ClearMoveIntent(state);
+            return;
+        }
+
         bool applyChaseStrafe = ShouldApplyChaseStrafe(state, target, nowTick);
         Vector3 chaseDirection = BuildChaseDirection(bot, state, navTarget, players, behavior, applyChaseStrafe, useScpForwardStrafe);
-        if (TryMoveTowardDirection(bot, chaseDirection, behavior, tryInvokeDummyActions, allowBackward: false, out string chaseMoveLabel))
+        float chaseStepDistance = Mathf.Clamp(chaseDirection.magnitude * 0.85f, 0.15f, behavior.NavMeshCornerMoveMaxStep);
+        if (TryMoveTowardNavigationDirection(
+                bot,
+                state,
+                chaseDirection,
+                behavior,
+                tryInvokeDummyActions,
+                out string chaseMoveLabel,
+                chaseStepDistance,
+                nowTick,
+                logNavDebug))
         {
             RecordMoveIntent(state, chaseMoveLabel, nowTick);
             MaybeTriggerForwardRecoveryJump(bot, state, behavior, tryInvokeDummyActions, nowTick, useScpForwardStrafe);
@@ -833,7 +957,17 @@ internal sealed class BotControllerService
         Vector3 directDirection = moveGoal - bot.Position;
         directDirection.y = 0f;
         directDirection += BuildSeparationDirection(bot, players, behavior.NearbyBotAvoidanceRadius) * SeparationWeight;
-        if (TryMoveTowardDirection(bot, directDirection, behavior, tryInvokeDummyActions, allowBackward: false, out string directMoveLabel))
+        float directStepDistance = Mathf.Clamp(directDirection.magnitude * 0.85f, 0.15f, behavior.NavMeshCornerMoveMaxStep);
+        if (TryMoveTowardNavigationDirection(
+                bot,
+                state,
+                directDirection,
+                behavior,
+                tryInvokeDummyActions,
+                out string directMoveLabel,
+                directStepDistance,
+                nowTick,
+                logNavDebug))
         {
             RecordMoveIntent(state, directMoveLabel, nowTick);
             MaybeTriggerForwardRecoveryJump(bot, state, behavior, tryInvokeDummyActions, nowTick, useScpForwardStrafe);
@@ -845,6 +979,96 @@ internal sealed class BotControllerService
         }
 
         ClearMoveIntent(state);
+    }
+
+    private static bool TryApplyRepkinsFpcMovement(
+        Player bot,
+        ManagedBotState state,
+        BotBehaviorDefinition behavior,
+        BotTargetSelection? target,
+        Vector3 navTarget,
+        int nowTick,
+        Action<Player, ManagedBotState, string> logNavDebug)
+    {
+        if (!RepkinsFpcMovementRegistry.TryResolveSteeringTarget(
+                bot,
+                state,
+                navTarget,
+                behavior,
+                logNavDebug,
+                out Vector3 steeringTarget))
+        {
+            return false;
+        }
+
+        if (!RepkinsFpcMovementRegistry.TryApplyMove(bot, state, steeringTarget, nowTick, out string moveLabel))
+        {
+            return false;
+        }
+
+        float navDistance = HorizontalDistance(bot.Position, steeringTarget);
+        LogNavigationMove(
+            bot,
+            state,
+            behavior,
+            target,
+            steeringTarget,
+            navDistance,
+            navDistance,
+            moveLabel,
+            "repkins-fpc",
+            logNavDebug,
+            nowTick);
+        return true;
+    }
+
+    private bool UpdateFacilityWaypointFollower(
+        Player bot,
+        ManagedBotState state,
+        BotBehaviorDefinition behavior,
+        bool shouldFollow,
+        Action<Player, ManagedBotState, string> logNavDebug)
+    {
+        GameObject? botGameObject = bot.GameObject;
+        if (botGameObject == null)
+        {
+            return false;
+        }
+
+        FacilityWaypointFollower? follower = botGameObject.GetComponent<FacilityWaypointFollower>();
+        bool hasWaypoint = state.NavigationWaypointIndex >= 0
+            && state.NavigationWaypointIndex < state.NavigationWaypoints.Count
+            && state.LastNavigationReason.StartsWith("room-graph", StringComparison.Ordinal);
+        bool canUseFollower = bot.ReferenceHub != null
+            && bot.Role != RoleTypeId.Spectator
+            && NetworkServer.active
+            && bot.ReferenceHub.roleManager.CurrentRole is IFpcRole;
+        if (!shouldFollow || !hasWaypoint || !canUseFollower)
+        {
+            if (follower != null)
+            {
+                UnityEngine.Object.Destroy(follower);
+                logNavDebug(bot, state, "facility-node-follower stop");
+            }
+
+            if (shouldFollow && hasWaypoint && !canUseFollower)
+            {
+                logNavDebug(bot, state, "facility-node-follower unavailable reason=no-fpc-role");
+            }
+
+            return false;
+        }
+
+        if (follower == null)
+        {
+            follower = botGameObject.AddComponent<FacilityWaypointFollower>();
+            logNavDebug(bot, state, "facility-node-follower start");
+        }
+
+        follower.Init(bot, state, () => behavior, logNavDebug);
+        state.LastMoveIntentLabel = "facility-node-follow";
+        state.LastMoveIntentTick = Environment.TickCount;
+        return true;
     }
 
     private void TryRecoverDirectNavMeshPosition(
@@ -1397,7 +1621,7 @@ internal sealed class BotControllerService
             }
 
             if (NavMesh.Raycast(currentHit.position, stepHit.position, out _, NavMesh.AllAreas)
-                || IsForwardClipBlocked(bot, bot.Position, away, navDelta.magnitude)
+                || IsForwardClipBlocked(bot, bot.Position, away, navDelta.magnitude, behavior)
                 || !HasStableFloorAfterStep(bot.Position, away, navDelta.magnitude, behavior))
             {
                 return false;
@@ -1416,7 +1640,7 @@ internal sealed class BotControllerService
         Vector3 flatCandidate = bot.Position + (away * Mathf.Min(step, 1.0f));
         flatCandidate.y = bot.Position.y;
         float flatStep = Mathf.Min(step, 1.0f);
-        if (IsForwardClipBlocked(bot, bot.Position, away, flatStep)
+        if (IsForwardClipBlocked(bot, bot.Position, away, flatStep, behavior)
             || !HasStableFloorAfterStep(bot.Position, away, flatStep, behavior))
         {
             return false;
@@ -1489,6 +1713,922 @@ internal sealed class BotControllerService
         return false;
     }
 
+    private static bool TryMoveTowardNavigationDirection(
+        Player bot,
+        ManagedBotState state,
+        Vector3 desiredDirection,
+        BotBehaviorDefinition behavior,
+        Func<Player, IEnumerable<string>, bool> tryInvokeDummyActions,
+        out string moveLabel,
+        float maxStepDistance,
+        int nowTick,
+        Action<Player, ManagedBotState, string> logNavDebug)
+    {
+        moveLabel = "none";
+        desiredDirection.y = 0f;
+        if (desiredDirection.sqrMagnitude < 0.0001f)
+        {
+            return false;
+        }
+
+        Vector3 desired = desiredDirection.normalized;
+        float directClearStep = GetClearStepDistance(bot, desired, behavior);
+        bool avoiding = unchecked(state.LocalAvoidanceUntilTick - nowTick) > 0
+            || directClearStep < Mathf.Min(maxStepDistance, 0.8f)
+            || state.StuckTicks > 0;
+
+        float movementYaw = NormalizeSignedAngle(bot.LookRotation.y);
+        Quaternion yawRotation = Quaternion.Euler(0f, movementYaw, 0f);
+        Vector3 forward = yawRotation * Vector3.forward;
+        Vector3 right = yawRotation * Vector3.right;
+        int initialPreferredSide = state.LocalAvoidanceDirection != 0
+            ? state.LocalAvoidanceDirection
+            : (state.StrafeDirection >= 0 ? 1 : -1);
+        float obstacleLookAhead = Mathf.Max(maxStepDistance, 1.5f);
+        LocalObstacleAvoidance obstacleAvoidance = default;
+        bool obstacleAvoidanceActive = avoiding
+            && TryGetLocalObstacleAvoidance(
+                bot,
+                desired,
+                right,
+                initialPreferredSide,
+                obstacleLookAhead,
+                behavior,
+                out obstacleAvoidance);
+        if (obstacleAvoidanceActive)
+        {
+            Vector3 heldTangent = state.LocalAvoidanceTangent;
+            heldTangent.y = 0f;
+            if (heldTangent.sqrMagnitude > 0.0001f
+                && directClearStep < Mathf.Min(maxStepDistance, 0.8f)
+                && Vector3.Dot(heldTangent.normalized, obstacleAvoidance.Tangent) < -0.2f)
+            {
+                obstacleAvoidance = new LocalObstacleAvoidance(
+                    obstacleAvoidance.Point,
+                    obstacleAvoidance.Away,
+                    heldTangent.normalized,
+                    state.LocalAvoidanceDirection != 0 ? state.LocalAvoidanceDirection : obstacleAvoidance.PreferredSide,
+                    obstacleAvoidance.Distance);
+            }
+            else
+            {
+                state.LocalAvoidanceTangent = obstacleAvoidance.Tangent;
+            }
+        }
+        else if (directClearStep >= Mathf.Min(maxStepDistance, 0.8f))
+        {
+            state.LocalAvoidanceTangent = default;
+        }
+
+        int preferredSide = obstacleAvoidanceActive
+            && state.LocalAvoidanceDirection == 0
+            ? obstacleAvoidance.PreferredSide
+            : initialPreferredSide;
+
+        string[] preferredSideActions = preferredSide >= 0 ? behavior.WalkRightActionNames : behavior.WalkLeftActionNames;
+        string[] oppositeSideActions = preferredSide >= 0 ? behavior.WalkLeftActionNames : behavior.WalkRightActionNames;
+        Vector3 preferredSideDirection = preferredSide >= 0 ? right : -right;
+        Vector3 oppositeSideDirection = preferredSide >= 0 ? -right : right;
+        List<(float Score, string[] Actions, string Label, Vector3 Direction, int Side, float ClearStep)> candidates = new()
+        {
+            (0f, behavior.WalkForwardActionNames, "forward", forward, 0, 0f),
+            (0f, preferredSideActions, preferredSide >= 0 ? "right" : "left", preferredSideDirection, preferredSide >= 0 ? 1 : -1, 0f),
+            (0f, oppositeSideActions, preferredSide >= 0 ? "left" : "right", oppositeSideDirection, preferredSide >= 0 ? -1 : 1, 0f),
+        };
+
+        if (avoiding)
+        {
+            candidates.Add((0f, behavior.WalkBackwardActionNames, "back", -forward, 0, 0f));
+            candidates.Add((
+                0f,
+                CombineMovementActions(behavior.WalkForwardActionNames, preferredSideActions),
+                preferredSide >= 0 ? "forward-right" : "forward-left",
+                (forward + preferredSideDirection).normalized,
+                preferredSide >= 0 ? 1 : -1,
+                0f));
+            candidates.Add((
+                0f,
+                CombineMovementActions(behavior.WalkForwardActionNames, oppositeSideActions),
+                preferredSide >= 0 ? "forward-left" : "forward-right",
+                (forward + oppositeSideDirection).normalized,
+                preferredSide >= 0 ? -1 : 1,
+                0f));
+            candidates.Add((
+                0f,
+                CombineMovementActions(behavior.WalkBackwardActionNames, preferredSideActions),
+                preferredSide >= 0 ? "back-right" : "back-left",
+                (-forward + preferredSideDirection).normalized,
+                preferredSide >= 0 ? 1 : -1,
+                0f));
+            candidates.Add((
+                0f,
+                CombineMovementActions(behavior.WalkBackwardActionNames, oppositeSideActions),
+                preferredSide >= 0 ? "back-left" : "back-right",
+                (-forward + oppositeSideDirection).normalized,
+                preferredSide >= 0 ? -1 : 1,
+                0f));
+        }
+
+        if (obstacleAvoidanceActive)
+        {
+            AddWorldDirectionCandidate(
+                candidates,
+                obstacleAvoidance.Tangent,
+                forward,
+                right,
+                behavior,
+                "slide-tangent");
+            AddWorldDirectionCandidate(
+                candidates,
+                (obstacleAvoidance.Tangent + obstacleAvoidance.Away * 0.45f).normalized,
+                forward,
+                right,
+                behavior,
+                "slide-clear");
+        }
+
+        bool doorFrameAvoidanceActive = TryGetRecentDoorFrameAvoidance(
+            state,
+            bot.Position,
+            nowTick,
+            out Vector3 awayFromDoorFrame);
+        float bestScore = float.NegativeInfinity;
+        string[]? bestActions = null;
+        string bestLabel = "none";
+        int bestSide = 0;
+        float bestClearStep = 0f;
+        foreach ((_, string[] actions, string label, Vector3 direction, int side, _) in candidates)
+        {
+            if (actions == null || actions.Length == 0)
+            {
+                continue;
+            }
+
+            float clearStep = GetClearStepDistance(bot, direction, behavior);
+            if (clearStep <= 0.05f)
+            {
+                continue;
+            }
+
+            float alignment = Vector3.Dot(desired, direction.normalized);
+            if (!avoiding && alignment < 0.05f)
+            {
+                continue;
+            }
+
+            float sideBias = avoiding && side == preferredSide ? 0.75f : 0f;
+            float backPenalty = string.Equals(label, "back", StringComparison.Ordinal) ? 0.65f : 0f;
+            float forwardPenalty = avoiding && string.Equals(label, "forward", StringComparison.Ordinal) ? 0.35f : 0f;
+            float obstacleBias = 0f;
+            if (obstacleAvoidanceActive)
+            {
+                Vector3 flatDirection = direction.normalized;
+                float awayAlignment = Vector3.Dot(flatDirection, obstacleAvoidance.Away);
+                obstacleBias += Vector3.Dot(flatDirection, obstacleAvoidance.Tangent) * 2.35f;
+                obstacleBias += awayAlignment * 1.15f;
+
+                if (side != 0 && side == obstacleAvoidance.PreferredSide)
+                {
+                    obstacleBias += 1.1f;
+                }
+                else if (side != 0)
+                {
+                    obstacleBias -= 0.35f;
+                }
+
+                if (string.Equals(label, "forward", StringComparison.Ordinal)
+                    && directClearStep < 0.65f)
+                {
+                    obstacleBias -= 1.8f;
+                }
+                else if (label.StartsWith("forward-", StringComparison.Ordinal)
+                    && side == obstacleAvoidance.PreferredSide)
+                {
+                    obstacleBias += 0.45f;
+                }
+                else if (label.StartsWith("slide-", StringComparison.Ordinal))
+                {
+                    obstacleBias += 1.2f;
+                }
+
+                if (string.Equals(label, "back", StringComparison.Ordinal)
+                    && directClearStep > 0.15f)
+                {
+                    obstacleBias -= 0.45f;
+                }
+            }
+            else if (doorFrameAvoidanceActive)
+            {
+                float doorAwayAlignment = Vector3.Dot(direction.normalized, awayFromDoorFrame);
+                obstacleBias = doorAwayAlignment * 0.8f;
+                if (string.Equals(label, "forward", StringComparison.Ordinal)
+                    && doorAwayAlignment < 0.2f
+                    && directClearStep < 0.55f)
+                {
+                    obstacleBias -= 0.85f;
+                }
+                else if (side != 0 && doorAwayAlignment > 0.15f)
+                {
+                    obstacleBias += 0.35f;
+                }
+            }
+
+            float score = (alignment * 1.8f)
+                + (Mathf.Min(clearStep, maxStepDistance) * 1.25f)
+                + sideBias
+                + obstacleBias
+                - backPenalty
+                - forwardPenalty;
+            if (score <= bestScore)
+            {
+                continue;
+            }
+
+            bestScore = score;
+            bestActions = actions;
+            bestLabel = label;
+            bestSide = side;
+            bestClearStep = clearStep;
+        }
+
+        if (bestActions == null)
+        {
+            if (TryApplyEmergencySlide(
+                    bot,
+                    state,
+                    behavior,
+                    tryInvokeDummyActions,
+                    obstacleAvoidanceActive,
+                    obstacleAvoidance,
+                    forward,
+                    right,
+                    preferredSide,
+                    nowTick,
+                    logNavDebug,
+                    out moveLabel))
+            {
+                return true;
+            }
+
+            bool turned = ApplyLocalAvoidanceTurn(
+                bot,
+                state,
+                behavior,
+                tryInvokeDummyActions,
+                preferredSide,
+                "blocked",
+                0f,
+                nowTick,
+                logNavDebug);
+            moveLabel = "local-blocked";
+            state.LastMoveUsedNavigation = true;
+            state.LocalAvoidanceUntilTick = nowTick + LocalAvoidanceHoldMs;
+            if (state.ForwardStallSinceTick == 0)
+            {
+                state.ForwardStallSinceTick = nowTick;
+            }
+
+            state.StuckTicks = Math.Max(state.StuckTicks, 1);
+
+            if (unchecked(nowTick - state.LastLocalAvoidanceLogTick) >= LocalAvoidanceLogIntervalMs)
+            {
+                state.LastLocalAvoidanceLogTick = nowTick;
+                logNavDebug(
+                    bot,
+                    state,
+                    $"local-steer-blocked clear={directClearStep:F2} turned={turned} pos=({bot.Position.x:F1},{bot.Position.y:F1},{bot.Position.z:F1})");
+            }
+
+            return true;
+        }
+
+        float boundedStep = Mathf.Min(maxStepDistance, bestClearStep * 0.85f);
+        string[] boundedActions = SelectWalkActionsForDistance(bestActions, boundedStep);
+        Vector3 positionBeforeMove = bot.Position;
+        if (boundedActions.Length == 0 || !tryInvokeDummyActions(bot, boundedActions))
+        {
+            return false;
+        }
+
+        ApplyForwardMoveBurst(bot, bestLabel, boundedActions, behavior, tryInvokeDummyActions);
+        float backwardProgress = CalculateBackwardProgress(positionBeforeMove, bot.Position, forward);
+        moveLabel = bestLabel;
+        if (avoiding || bestSide != 0)
+        {
+            bool canChangeAvoidanceSide = state.LocalAvoidanceDirection == 0
+                || unchecked(state.LocalAvoidanceUntilTick - nowTick) <= 0;
+            state.LocalAvoidanceUntilTick = nowTick + LocalAvoidanceHoldMs;
+            if (bestSide != 0)
+            {
+                if (canChangeAvoidanceSide)
+                {
+                    state.LocalAvoidanceDirection = bestSide;
+                    state.StrafeDirection = bestSide;
+                }
+
+                state.LastBlockedMoveLabel = bestLabel;
+            }
+
+            bool turned = ApplyLocalAvoidanceTurn(
+                bot,
+                state,
+                behavior,
+                tryInvokeDummyActions,
+                state.LocalAvoidanceDirection != 0 ? state.LocalAvoidanceDirection : preferredSide,
+                bestLabel,
+                backwardProgress,
+                nowTick,
+                logNavDebug);
+
+            if (unchecked(nowTick - state.LastLocalAvoidanceLogTick) >= LocalAvoidanceLogIntervalMs)
+            {
+                state.LastLocalAvoidanceLogTick = nowTick;
+                logNavDebug(
+                    bot,
+                    state,
+                    $"local-steer move={bestLabel} directClear={directClearStep:F2} moveClear={bestClearStep:F2} backward={backwardProgress:F2} side={state.LocalAvoidanceDirection} obstacle={obstacleAvoidanceActive} obstacleSide={(obstacleAvoidanceActive ? obstacleAvoidance.PreferredSide : 0)} obstacleDist={(obstacleAvoidanceActive ? obstacleAvoidance.Distance : 0f):F2} lookAhead={obstacleLookAhead:F1} doorFrame={doorFrameAvoidanceActive} turn={turned}");
+            }
+        }
+        else if (directClearStep >= Mathf.Min(maxStepDistance, 0.8f))
+        {
+            state.LocalAvoidanceUntilTick = 0;
+            state.LocalAvoidanceDirection = 0;
+            state.LocalAvoidanceTurnDirection = 0;
+            state.LocalAvoidanceTurnDirectionUntilTick = 0;
+            state.LocalAvoidanceTangent = default;
+            state.LastLocalAvoidanceTurnTick = 0;
+        }
+
+        return true;
+    }
+
+    private static string[] CombineMovementActions(string[]? first, string[]? second)
+    {
+        List<string> combined = new();
+        if (first != null)
+        {
+            foreach (string action in first)
+            {
+                if (!string.IsNullOrWhiteSpace(action) && !combined.Contains(action))
+                {
+                    combined.Add(action);
+                }
+            }
+        }
+
+        if (second != null)
+        {
+            foreach (string action in second)
+            {
+                if (!string.IsNullOrWhiteSpace(action) && !combined.Contains(action))
+                {
+                    combined.Add(action);
+                }
+            }
+        }
+
+        return combined.ToArray();
+    }
+
+    private static void AddWorldDirectionCandidate(
+        List<(float Score, string[] Actions, string Label, Vector3 Direction, int Side, float ClearStep)> candidates,
+        Vector3 direction,
+        Vector3 forward,
+        Vector3 right,
+        BotBehaviorDefinition behavior,
+        string label)
+    {
+        direction.y = 0f;
+        if (direction.sqrMagnitude < 0.0001f)
+        {
+            return;
+        }
+
+        direction.Normalize();
+        float forwardDot = Vector3.Dot(direction, forward);
+        float rightDot = Vector3.Dot(direction, right);
+        string[]? forwardActions = null;
+        string forwardLabel = "";
+        if (forwardDot >= 0.28f)
+        {
+            forwardActions = behavior.WalkForwardActionNames;
+            forwardLabel = "forward";
+        }
+        else if (forwardDot <= -0.28f)
+        {
+            forwardActions = behavior.WalkBackwardActionNames;
+            forwardLabel = "back";
+        }
+
+        string[]? sideActions = null;
+        string sideLabel = "";
+        int side = 0;
+        if (rightDot >= 0.28f)
+        {
+            sideActions = behavior.WalkRightActionNames;
+            sideLabel = "right";
+            side = 1;
+        }
+        else if (rightDot <= -0.28f)
+        {
+            sideActions = behavior.WalkLeftActionNames;
+            sideLabel = "left";
+            side = -1;
+        }
+
+        string[] actions = CombineMovementActions(forwardActions, sideActions);
+        if (actions.Length == 0)
+        {
+            return;
+        }
+
+        string suffix = string.IsNullOrWhiteSpace(forwardLabel)
+            ? sideLabel
+            : string.IsNullOrWhiteSpace(sideLabel)
+                ? forwardLabel
+                : $"{forwardLabel}-{sideLabel}";
+        candidates.Add((0f, actions, $"{label}-{suffix}", direction, side, 0f));
+    }
+
+    private static bool TryApplyEmergencySlide(
+        Player bot,
+        ManagedBotState state,
+        BotBehaviorDefinition behavior,
+        Func<Player, IEnumerable<string>, bool> tryInvokeDummyActions,
+        bool obstacleAvoidanceActive,
+        LocalObstacleAvoidance obstacleAvoidance,
+        Vector3 forward,
+        Vector3 right,
+        int preferredSide,
+        int nowTick,
+        Action<Player, ManagedBotState, string> logNavDebug,
+        out string moveLabel)
+    {
+        moveLabel = "none";
+        Vector3 sideDirection = preferredSide >= 0 ? right : -right;
+        Vector3 escapeDirection = obstacleAvoidanceActive
+            ? (obstacleAvoidance.Tangent + obstacleAvoidance.Away * 0.85f).normalized
+            : (sideDirection - forward * 0.45f).normalized;
+        string[] actions = BuildWorldDirectionActions(
+            escapeDirection,
+            forward,
+            right,
+            behavior,
+            out string actionLabel,
+            out int side);
+        if (actions.Length == 0 || !tryInvokeDummyActions(bot, actions))
+        {
+            return false;
+        }
+
+        moveLabel = $"slide-emergency-{actionLabel}";
+        state.LastMoveUsedNavigation = true;
+        state.LocalAvoidanceUntilTick = nowTick + LocalAvoidanceHoldMs;
+        if (side != 0)
+        {
+            state.LocalAvoidanceDirection = side;
+            state.StrafeDirection = side;
+        }
+
+        if (state.ForwardStallSinceTick == 0)
+        {
+            state.ForwardStallSinceTick = nowTick;
+        }
+
+        bool turned = ApplyLocalAvoidanceTurn(
+            bot,
+            state,
+            behavior,
+            tryInvokeDummyActions,
+            state.LocalAvoidanceDirection != 0 ? state.LocalAvoidanceDirection : preferredSide,
+            moveLabel,
+            0f,
+            nowTick,
+            logNavDebug);
+
+        if (unchecked(nowTick - state.LastLocalAvoidanceLogTick) >= LocalAvoidanceLogIntervalMs)
+        {
+            state.LastLocalAvoidanceLogTick = nowTick;
+            logNavDebug(
+                bot,
+                state,
+                $"local-slide-emergency move={moveLabel} side={state.LocalAvoidanceDirection} obstacle={obstacleAvoidanceActive} obstacleDist={(obstacleAvoidanceActive ? obstacleAvoidance.Distance : 0f):F2} turned={turned} pos=({bot.Position.x:F1},{bot.Position.y:F1},{bot.Position.z:F1})");
+        }
+
+        return true;
+    }
+
+    private static string[] BuildWorldDirectionActions(
+        Vector3 direction,
+        Vector3 forward,
+        Vector3 right,
+        BotBehaviorDefinition behavior,
+        out string label,
+        out int side)
+    {
+        label = "none";
+        side = 0;
+        direction.y = 0f;
+        if (direction.sqrMagnitude < 0.0001f)
+        {
+            return Array.Empty<string>();
+        }
+
+        direction.Normalize();
+        float forwardDot = Vector3.Dot(direction, forward);
+        float rightDot = Vector3.Dot(direction, right);
+        string[]? forwardActions = null;
+        string forwardLabel = "";
+        if (forwardDot >= 0.28f)
+        {
+            forwardActions = behavior.WalkForwardActionNames;
+            forwardLabel = "forward";
+        }
+        else if (forwardDot <= -0.28f)
+        {
+            forwardActions = behavior.WalkBackwardActionNames;
+            forwardLabel = "back";
+        }
+
+        string[]? sideActions = null;
+        string sideLabel = "";
+        if (rightDot >= 0.28f)
+        {
+            sideActions = behavior.WalkRightActionNames;
+            sideLabel = "right";
+            side = 1;
+        }
+        else if (rightDot <= -0.28f)
+        {
+            sideActions = behavior.WalkLeftActionNames;
+            sideLabel = "left";
+            side = -1;
+        }
+
+        label = string.IsNullOrWhiteSpace(forwardLabel)
+            ? sideLabel
+            : string.IsNullOrWhiteSpace(sideLabel)
+                ? forwardLabel
+                : $"{forwardLabel}-{sideLabel}";
+        return CombineMovementActions(forwardActions, sideActions);
+    }
+
+    private static bool TryGetLocalObstacleAvoidance(
+        Player bot,
+        Vector3 direction,
+        Vector3 right,
+        int fallbackSide,
+        float lookAhead,
+        BotBehaviorDefinition behavior,
+        out LocalObstacleAvoidance avoidance)
+    {
+        avoidance = default;
+        direction.y = 0f;
+        if (direction.sqrMagnitude < 0.0001f)
+        {
+            return false;
+        }
+
+        if (!TryGetForwardClipHit(bot, bot.Position, direction, Mathf.Max(0.5f, lookAhead), behavior, out RaycastHit hit))
+        {
+            return TryGetCurrentCylinderOverlapAvoidance(
+                bot,
+                direction,
+                right,
+                fallbackSide,
+                behavior,
+                out avoidance);
+        }
+
+        Vector3 away = hit.normal;
+        away.y = 0f;
+        if (away.sqrMagnitude < 0.0001f)
+        {
+            away = bot.Position - hit.point;
+            away.y = 0f;
+        }
+
+        return TryBuildLocalObstacleAvoidance(
+            hit.point,
+            away,
+            direction,
+            right,
+            fallbackSide,
+            hit.distance,
+            out avoidance);
+    }
+
+    private static bool TryGetCurrentCylinderOverlapAvoidance(
+        Player bot,
+        Vector3 direction,
+        Vector3 right,
+        int fallbackSide,
+        BotBehaviorDefinition behavior,
+        out LocalObstacleAvoidance avoidance)
+    {
+        avoidance = default;
+        float radius = GetLocalCylinderRadius(behavior);
+        Vector3 bottom = bot.Position + Vector3.up * LocalCylinderBottom;
+        Vector3 top = bot.Position + Vector3.up * LocalCylinderTop;
+        Vector3 probe = bot.Position + Vector3.up * ((LocalCylinderBottom + LocalCylinderTop) * 0.5f);
+        Collider[] overlaps = Physics.OverlapCapsule(
+            bottom,
+            top,
+            radius,
+            ~0,
+            QueryTriggerInteraction.Ignore);
+
+        Vector3 weightedAway = Vector3.zero;
+        Vector3 closestPoint = bot.Position;
+        float closestDistance = float.PositiveInfinity;
+        int blockers = 0;
+        foreach (Collider collider in overlaps)
+        {
+            if (collider == null)
+            {
+                continue;
+            }
+
+            Transform hitTransform = collider.transform;
+            if (hitTransform == null || IsNavigationIgnoredTransform(bot, hitTransform))
+            {
+                continue;
+            }
+
+            Vector3 point = collider.ClosestPoint(probe);
+            Vector3 away = bot.Position - point;
+            away.y = 0f;
+            float distance = away.magnitude;
+            if (distance < 0.001f)
+            {
+                away = bot.Position - collider.bounds.center;
+                away.y = 0f;
+                distance = away.magnitude;
+            }
+
+            if (distance < 0.001f)
+            {
+                continue;
+            }
+
+            blockers++;
+            weightedAway += away.normalized / Mathf.Max(0.08f, distance);
+            if (distance < closestDistance)
+            {
+                closestDistance = distance;
+                closestPoint = point;
+            }
+        }
+
+        if (blockers == 0 || weightedAway.sqrMagnitude < 0.0001f)
+        {
+            return false;
+        }
+
+        return TryBuildLocalObstacleAvoidance(
+            closestPoint,
+            weightedAway,
+            direction,
+            right,
+            fallbackSide,
+            0f,
+            out avoidance);
+    }
+
+    private static bool TryBuildLocalObstacleAvoidance(
+        Vector3 point,
+        Vector3 away,
+        Vector3 direction,
+        Vector3 right,
+        int fallbackSide,
+        float distance,
+        out LocalObstacleAvoidance avoidance)
+    {
+        avoidance = default;
+        away.y = 0f;
+        if (away.sqrMagnitude < 0.0001f)
+        {
+            return false;
+        }
+
+        away.Normalize();
+
+        Vector3 tangent = direction - away * Vector3.Dot(direction, away);
+        tangent.y = 0f;
+        float tangentStrength = tangent.magnitude;
+        if (tangent.sqrMagnitude < 0.0001f)
+        {
+            tangent = Vector3.Cross(Vector3.up, away);
+            tangent.y = 0f;
+            if (tangent.sqrMagnitude < 0.0001f)
+            {
+                return false;
+            }
+
+            if (Vector3.Dot(tangent, direction) < 0f)
+            {
+                tangent = -tangent;
+            }
+        }
+
+        tangent.Normalize();
+
+        int preferredSide = fallbackSide >= 0 ? 1 : -1;
+        if (right.sqrMagnitude > 0.0001f)
+        {
+            Vector3 normalizedRight = right.normalized;
+            float tangentSide = Vector3.Dot(normalizedRight, tangent);
+            if (tangentStrength < 0.18f)
+            {
+                tangent = normalizedRight * preferredSide;
+            }
+            else if (Mathf.Abs(tangentSide) > 0.12f && Math.Sign(tangentSide) != preferredSide)
+            {
+                tangent = -tangent;
+            }
+            else if (Mathf.Abs(tangentSide) > 0.12f)
+            {
+                preferredSide = tangentSide >= 0f ? 1 : -1;
+            }
+        }
+
+        if (preferredSide != 0 && right.sqrMagnitude > 0.0001f)
+        {
+            Vector3 preferredWorldSide = preferredSide >= 0 ? right.normalized : -right.normalized;
+            if (Vector3.Dot(preferredWorldSide, tangent) < -0.15f)
+            {
+                tangent = -tangent;
+            }
+        }
+
+        avoidance = new LocalObstacleAvoidance(point, away, tangent, preferredSide, distance);
+        return true;
+    }
+
+    private static bool TryGetRecentDoorFrameAvoidance(
+        ManagedBotState state,
+        Vector3 botPosition,
+        int nowTick,
+        out Vector3 awayFromDoorFrame)
+    {
+        awayFromDoorFrame = default;
+        if (state.LastRelevantDoorTick == 0
+            || unchecked(nowTick - state.LastRelevantDoorTick) > RelevantDoorCacheMs
+            || Mathf.Abs(state.LastRelevantDoorPosition.y - botPosition.y) > 5.0f
+            || HorizontalDistance(botPosition, state.LastRelevantDoorPosition) > 3.0f)
+        {
+            return false;
+        }
+
+        awayFromDoorFrame = botPosition - state.LastRelevantDoorPosition;
+        awayFromDoorFrame.y = 0f;
+        if (awayFromDoorFrame.sqrMagnitude < 0.0001f)
+        {
+            return false;
+        }
+
+        awayFromDoorFrame.Normalize();
+        return true;
+    }
+
+    private static bool ApplyLocalAvoidanceTurn(
+        Player bot,
+        ManagedBotState state,
+        BotBehaviorDefinition behavior,
+        Func<Player, IEnumerable<string>, bool> tryInvokeDummyActions,
+        int preferredDirection,
+        string moveLabel,
+        float backwardProgress,
+        int nowTick,
+        Action<Player, ManagedBotState, string> logNavDebug)
+    {
+        int requestedTurnDirection = preferredDirection >= 0 ? 1 : -1;
+        bool backwardFlip = string.Equals(moveLabel, "back", StringComparison.Ordinal)
+            && backwardProgress >= LocalAvoidanceBackwardFlipProgress;
+        if (backwardFlip)
+        {
+            requestedTurnDirection *= -1;
+        }
+
+        int turnDirection = requestedTurnDirection;
+        if (state.LocalAvoidanceTurnDirection != 0
+            && unchecked(state.LocalAvoidanceTurnDirectionUntilTick - nowTick) > 0)
+        {
+            turnDirection = state.LocalAvoidanceTurnDirection;
+        }
+        else
+        {
+            state.LocalAvoidanceTurnDirection = requestedTurnDirection;
+            state.LocalAvoidanceTurnDirectionUntilTick = nowTick + LocalAvoidanceTurnHoldMs;
+            turnDirection = requestedTurnDirection;
+        }
+
+        if (state.LastLocalAvoidanceTurnTick != 0
+            && unchecked(nowTick - state.LastLocalAvoidanceTurnTick) < LocalAvoidanceTurnIntervalMs)
+        {
+            return false;
+        }
+
+        string[] actionNames = turnDirection >= 0
+            ? behavior.LookHorizontalPositiveActionNames
+            : behavior.LookHorizontalNegativeActionNames;
+        string? action = SelectLookTurnAction(actionNames, LocalAvoidanceTurnStepDegrees);
+        if (string.IsNullOrWhiteSpace(action))
+        {
+            return false;
+        }
+
+        bool turned = tryInvokeDummyActions(bot, new string[] { action! });
+        if (turned)
+        {
+            state.LastLocalAvoidanceTurnTick = nowTick;
+            state.LocalAvoidanceUntilTick = nowTick + LocalAvoidanceHoldMs;
+        }
+
+        if (unchecked(nowTick - state.LastLocalAvoidanceLogTick) >= LocalAvoidanceLogIntervalMs)
+        {
+            state.LastLocalAvoidanceLogTick = nowTick;
+            logNavDebug(
+                bot,
+                state,
+                $"local-turn move={moveLabel} requestedDir={requestedTurnDirection} heldDir={turnDirection} holdMs={Math.Max(0, unchecked(state.LocalAvoidanceTurnDirectionUntilTick - nowTick))} backProgress={backwardProgress:F2} backFlip={backwardFlip} action={action} turned={turned}");
+        }
+
+        return turned;
+    }
+
+    private static float CalculateBackwardProgress(Vector3 before, Vector3 after, Vector3 forward)
+    {
+        before.y = 0f;
+        after.y = 0f;
+        forward.y = 0f;
+        if (forward.sqrMagnitude < 0.0001f)
+        {
+            return 0f;
+        }
+
+        Vector3 delta = after - before;
+        return Mathf.Max(0f, Vector3.Dot(delta, -forward.normalized));
+    }
+
+    private static string? SelectLookTurnAction(string[]? actionNames, float maxDegrees)
+    {
+        if (actionNames == null || actionNames.Length == 0)
+        {
+            return null;
+        }
+
+        string? best = null;
+        float bestStep = 0f;
+        string? fallback = null;
+        float fallbackStep = float.PositiveInfinity;
+        foreach (string actionName in actionNames)
+        {
+            float step = ExtractLookStepDegrees(actionName);
+            if (float.IsInfinity(step) || step <= 0f)
+            {
+                continue;
+            }
+
+            if (step <= maxDegrees + 0.01f && step > bestStep)
+            {
+                best = actionName;
+                bestStep = step;
+            }
+            else if (step < fallbackStep)
+            {
+                fallback = actionName;
+                fallbackStep = step;
+            }
+        }
+
+        return best ?? fallback;
+    }
+
+    private static float ExtractLookStepDegrees(string actionName)
+    {
+        if (string.IsNullOrWhiteSpace(actionName))
+        {
+            return float.PositiveInfinity;
+        }
+
+        int signIndex = actionName.LastIndexOf('+');
+        if (signIndex < 0)
+        {
+            signIndex = actionName.LastIndexOf('-');
+        }
+
+        if (signIndex < 0 || signIndex >= actionName.Length - 1)
+        {
+            return float.PositiveInfinity;
+        }
+
+        string value = actionName.Substring(signIndex + 1);
+        return float.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float degrees)
+            ? Mathf.Abs(degrees)
+            : float.PositiveInfinity;
+    }
+
     private static float GetCloseRetreatSpeedScale(BotBehaviorDefinition behavior)
     {
         return Mathf.Clamp(behavior.CloseRetreatSpeedScale, 0.6f, 1.0f);
@@ -1505,7 +2645,7 @@ internal sealed class BotControllerService
         float[] steps = { 1.5f, 0.5f, 0.2f, 0.05f };
         foreach (float step in steps)
         {
-            if (!IsForwardClipBlocked(bot, bot.Position, direction, step)
+            if (!IsForwardClipBlocked(bot, bot.Position, direction, step, behavior)
                 && HasStableFloorAfterStep(bot.Position, direction, step, behavior))
             {
                 return step;
@@ -1860,7 +3000,50 @@ internal sealed class BotControllerService
 
         state.LastNavigationStuckRepathTick = nowTick;
         state.NavigationStuckRecoveryCount++;
-        TriggerStuckJumpIfReady(bot, state, behavior, tryInvokeDummyActions, logNavDebug, nowTick);
+        if (behavior.UseRepkinsFacilityNavigation
+            && state.LastNavigationReason.StartsWith("repkins-", StringComparison.Ordinal))
+        {
+            _navigationService.ForceRepath(state, "repkins-stuck-repath");
+            ResetNavMeshStuckNudgeLoop(state);
+            logNavDebug(
+                bot,
+                state,
+                $"repkins-stuck-repath ticks={state.StuckTicks} move={state.LastMoveIntentLabel} pos=({bot.Position.x:F1},{bot.Position.y:F1},{bot.Position.z:F1})");
+            state.StuckTicks = 0;
+            return;
+        }
+
+        if (state.LastNavigationReason.StartsWith("room-graph", StringComparison.Ordinal))
+        {
+            if (TryTeleportToRoomGraphWaypoint(bot, state, behavior, logNavDebug, nowTick))
+            {
+                state.StuckTicks = 0;
+                state.ForwardStallSinceTick = 0;
+                state.NavigationStuckRecoveryCount = 0;
+                ResetNavMeshStuckNudgeLoop(state);
+                state.LastPosition = bot.Position;
+                return;
+            }
+
+            _navigationService.ForceRepath(state, "room-graph-stuck-repath");
+            ResetNavMeshStuckNudgeLoop(state);
+            logNavDebug(
+                bot,
+                state,
+                $"room-graph-stuck-repath ticks={state.StuckTicks} move={state.LastMoveIntentLabel} pos=({bot.Position.x:F1},{bot.Position.y:F1},{bot.Position.z:F1})");
+            state.StuckTicks = 0;
+            return;
+        }
+
+        bool suppressJumpRecovery = ShouldSuppressStuckJumpRecovery(state);
+        if (suppressJumpRecovery)
+        {
+            ClearHeldLocalAvoidance(state, flipSide: true);
+        }
+        else
+        {
+            TriggerStuckJumpIfReady(bot, state, behavior, tryInvokeDummyActions, logNavDebug, nowTick);
+        }
 
         bool repeatedNudgeLoop = IsRecentNavMeshStuckNudgeLoop(state, nowTick);
         if (repeatedNudgeLoop)
@@ -1904,6 +3087,26 @@ internal sealed class BotControllerService
                 state,
                 $"stuck-no-nav ticks={state.StuckTicks} move={state.LastMoveIntentLabel} stallMs={GetForwardStallMs(state, nowTick)} pos=({bot.Position.x:F1},{bot.Position.y:F1},{bot.Position.z:F1})");
             state.StuckTicks = 0;
+            return;
+        }
+
+        if (TryTeleportToRoomGraphWaypoint(bot, state, behavior, logNavDebug, nowTick))
+        {
+            state.StuckTicks = 0;
+            state.ForwardStallSinceTick = 0;
+            state.NavigationStuckRecoveryCount = 0;
+            ResetNavMeshStuckNudgeLoop(state);
+            state.LastPosition = bot.Position;
+            return;
+        }
+
+        if (TryRememberRoomGraphBlockedSegment(bot, state, logNavDebug, nowTick))
+        {
+            state.StuckTicks = 0;
+            state.ForwardStallSinceTick = 0;
+            state.NavigationStuckRecoveryCount = 0;
+            ResetNavMeshStuckNudgeLoop(state);
+            state.LastPosition = bot.Position;
             return;
         }
 
@@ -1990,6 +3193,109 @@ internal sealed class BotControllerService
             : Math.Max(0, unchecked(nowTick - state.ForwardStallSinceTick));
     }
 
+    private static bool ShouldSuppressStuckJumpRecovery(ManagedBotState state)
+    {
+        if (state.LastNavigationReason.StartsWith("room-graph", StringComparison.Ordinal)
+            || state.LastNavigationReason.StartsWith("repkins-", StringComparison.Ordinal)
+            || state.LastNavigationReason.StartsWith("local-detour", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        string label = state.LastMoveIntentLabel ?? "";
+        return label.StartsWith("repkins-", StringComparison.Ordinal)
+            || label.StartsWith("slide-", StringComparison.Ordinal)
+            || label.StartsWith("forward-", StringComparison.Ordinal)
+            || label.StartsWith("back", StringComparison.Ordinal)
+            || string.Equals(label, "left", StringComparison.Ordinal)
+            || string.Equals(label, "right", StringComparison.Ordinal);
+    }
+
+    private static void ClearHeldLocalAvoidance(ManagedBotState state, bool flipSide)
+    {
+        state.LocalAvoidanceUntilTick = 0;
+        state.LocalAvoidanceTangent = default;
+        state.LocalAvoidanceTurnDirection = 0;
+        state.LocalAvoidanceTurnDirectionUntilTick = 0;
+        state.LastLocalAvoidanceTurnTick = 0;
+        if (flipSide)
+        {
+            int currentSide = state.LocalAvoidanceDirection != 0
+                ? state.LocalAvoidanceDirection
+                : (state.StrafeDirection >= 0 ? 1 : -1);
+            state.LocalAvoidanceDirection = -currentSide;
+            state.StrafeDirection = -currentSide;
+        }
+    }
+
+    private bool TryRememberRoomGraphBlockedSegment(
+        Player bot,
+        ManagedBotState state,
+        Action<Player, ManagedBotState, string> logNavDebug,
+        int nowTick)
+    {
+        if (!state.LastNavigationReason.StartsWith("room-graph", StringComparison.Ordinal)
+            || state.NavigationWaypointIndex <= 0
+            || state.NavigationWaypointIndex >= state.NavigationWaypoints.Count)
+        {
+            return false;
+        }
+
+        state.PruneRoomGraphBlockedSegments(nowTick);
+        Vector3 from = state.NavigationWaypoints[state.NavigationWaypointIndex - 1];
+        Vector3 to = state.NavigationWaypoints[state.NavigationWaypointIndex];
+        if (HorizontalDistance(from, to) < 0.75f
+            || Mathf.Abs(from.y - to.y) > 3.0f)
+        {
+            return false;
+        }
+
+        float segmentDrift = DistancePointToSegment2D(bot.Position, from, to);
+        if (segmentDrift > 1.25f)
+        {
+            logNavDebug(
+                bot,
+                state,
+                $"room-graph-blocked-segment-skip drift={segmentDrift:F2} from={FormatVector(from)} to={FormatVector(to)} pos={FormatVector(bot.Position)}");
+            return false;
+        }
+
+        int untilTick = unchecked(nowTick + RoomGraphBlockedSegmentMemoryMs);
+        RoomGraphBlockedSegment? existing = state.RoomGraphBlockedSegments.FirstOrDefault(segment =>
+            IsSameRoomGraphBlockedPoint(segment.From, from)
+            && IsSameRoomGraphBlockedPoint(segment.To, to)
+            || IsSameRoomGraphBlockedPoint(segment.From, to)
+            && IsSameRoomGraphBlockedPoint(segment.To, from));
+
+        if (existing == null)
+        {
+            state.RoomGraphBlockedSegments.Add(new RoomGraphBlockedSegment(from, to, untilTick));
+        }
+        else
+        {
+            existing.UntilTick = untilTick;
+            _navigationService.ForceRepath(state, "room-graph-blocked-segment-repeat");
+            logNavDebug(
+                bot,
+                state,
+                $"room-graph-blocked-segment-repeat from={FormatVector(from)} to={FormatVector(to)} pos={FormatVector(bot.Position)} blocked={state.RoomGraphBlockedSegments.Count} ttlMs={RoomGraphBlockedSegmentMemoryMs}");
+            return false;
+        }
+
+        _navigationService.ForceRepath(state, "room-graph-blocked-segment");
+        logNavDebug(
+            bot,
+            state,
+            $"room-graph-blocked-segment from={FormatVector(from)} to={FormatVector(to)} pos={FormatVector(bot.Position)} blocked={state.RoomGraphBlockedSegments.Count} ttlMs={RoomGraphBlockedSegmentMemoryMs}");
+        return true;
+    }
+
+    private static bool IsSameRoomGraphBlockedPoint(Vector3 left, Vector3 right)
+    {
+        return HorizontalDistance(left, right) <= RoomGraphBlockedSegmentMatchDistance
+            && Mathf.Abs(left.y - right.y) <= RoomGraphBlockedSegmentVerticalTolerance;
+    }
+
     private static bool IsRecentNavMeshStuckNudgeLoop(ManagedBotState state, int nowTick)
     {
         return state.NavMeshStuckNudgeLoopCount >= NavMeshStuckNudgeLoopEscalationCount
@@ -2002,7 +3308,7 @@ internal sealed class BotControllerService
         state.LastNavMeshStuckNudgeTick = 0;
     }
 
-    private static bool IsForwardClipBlocked(Player bot, Vector3 position, Vector3 direction, float step)
+    private static bool IsForwardClipBlocked(Player bot, Vector3 position, Vector3 direction, float step, BotBehaviorDefinition behavior)
     {
         if (direction.sqrMagnitude < 0.0001f)
         {
@@ -2010,36 +3316,82 @@ internal sealed class BotControllerService
         }
 
         Vector3 normalized = direction.normalized;
-        Vector3[] offsets =
-        {
-            Vector3.up * 0.35f,
-            Vector3.up * 0.95f,
-            Vector3.up * 1.45f,
-        };
+        return IsCylinderBodyBlocked(bot, position + normalized * Math.Max(0.02f, step), behavior)
+            || TryGetForwardClipHit(bot, position, normalized, step, behavior, out _);
+    }
 
-        foreach (Vector3 offset in offsets)
+    private static bool TryGetForwardClipHit(Player bot, Vector3 position, Vector3 direction, float step, BotBehaviorDefinition behavior, out RaycastHit closestHit)
+    {
+        if (direction.sqrMagnitude < 0.0001f)
         {
-            RaycastHit[] hits = Physics.SphereCastAll(
-                position + offset,
-                0.18f,
-                normalized,
-                step + 0.08f,
-                ~0,
-                QueryTriggerInteraction.Ignore);
-            Array.Sort(hits, (left, right) => left.distance.CompareTo(right.distance));
-            foreach (RaycastHit hit in hits)
+            closestHit = default;
+            return false;
+        }
+
+        Vector3 normalized = direction.normalized;
+        float radius = GetLocalCylinderRadius(behavior);
+        Vector3 bottom = position + Vector3.up * LocalCylinderBottom;
+        Vector3 top = position + Vector3.up * LocalCylinderTop;
+        bool hasHit = false;
+        closestHit = default;
+        RaycastHit[] hits = Physics.CapsuleCastAll(
+            bottom,
+            top,
+            radius,
+            normalized,
+            step + 0.15f,
+            ~0,
+            QueryTriggerInteraction.Ignore);
+        Array.Sort(hits, (left, right) => left.distance.CompareTo(right.distance));
+        foreach (RaycastHit hit in hits)
+        {
+            Transform hitTransform = hit.transform;
+            if (hitTransform == null || IsNavigationIgnoredTransform(bot, hitTransform))
             {
-                Transform hitTransform = hit.transform;
-                if (hitTransform == null || IsPlayerOwnedTransform(bot, hitTransform))
-                {
-                    continue;
-                }
-
-                return true;
+                continue;
             }
+
+            closestHit = hit;
+            hasHit = true;
+            break;
+        }
+
+        return hasHit;
+    }
+
+    private static bool IsCylinderBodyBlocked(Player bot, Vector3 position, BotBehaviorDefinition behavior)
+    {
+        float radius = GetLocalCylinderRadius(behavior);
+        Vector3 bottom = position + Vector3.up * LocalCylinderBottom;
+        Vector3 top = position + Vector3.up * LocalCylinderTop;
+        Collider[] overlaps = Physics.OverlapCapsule(
+            bottom,
+            top,
+            radius,
+            ~0,
+            QueryTriggerInteraction.Ignore);
+        foreach (Collider collider in overlaps)
+        {
+            if (collider == null)
+            {
+                continue;
+            }
+
+            Transform hitTransform = collider.transform;
+            if (hitTransform == null || IsNavigationIgnoredTransform(bot, hitTransform))
+            {
+                continue;
+            }
+
+            return true;
         }
 
         return false;
+    }
+
+    private static float GetLocalCylinderRadius(BotBehaviorDefinition behavior)
+    {
+        return Mathf.Clamp(behavior.FacilityRuntimeNavMeshAgentRadius + LocalCylinderSkin, 0.24f, 0.34f);
     }
 
     private void TryResetPathAfterTeleport(ManagedBotState state, Vector3 navPosition)
@@ -2124,6 +3476,7 @@ internal sealed class BotControllerService
     {
         if (useDust2Arena
             || target == null
+            || behavior.UseRepkinsFacilityNavigation
             || !behavior.LongRangeRandomRoomTeleportEnabled
             || target.Distance <= Mathf.Max(1.0f, behavior.LongRangeRandomRoomTeleportDistance)
             || unchecked(nowTick - state.LastLongRangeRoomTeleportTick) < Math.Max(1000, behavior.LongRangeRandomRoomTeleportCooldownMs)
@@ -2613,6 +3966,111 @@ internal sealed class BotControllerService
         return true;
     }
 
+    private bool TryTeleportToRoomGraphWaypoint(
+        Player bot,
+        ManagedBotState state,
+        BotBehaviorDefinition behavior,
+        Action<Player, ManagedBotState, string> logNavDebug,
+        int nowTick)
+    {
+        if (!state.LastNavigationReason.StartsWith("room-graph", StringComparison.Ordinal)
+            || state.NavigationWaypoints.Count == 0
+            || state.NavigationWaypointIndex < 0
+            || state.NavigationWaypointIndex >= state.NavigationWaypoints.Count
+            || unchecked(nowTick - state.LastRoomCenterTeleportTick) < Math.Max(500, behavior.NavMeshRoomCenterTeleportCooldownMs / 2))
+        {
+            return false;
+        }
+
+        int start = state.NavigationWaypointIndex;
+        int end = state.NavigationWaypointIndex;
+        Vector3 botPosition = bot.Position;
+        bool found = false;
+        int bestIndex = -1;
+        float bestScore = float.PositiveInfinity;
+        Vector3 bestNavPosition = default;
+        int checkedCandidates = 0;
+
+        for (int i = start; i <= end; i++)
+        {
+            Vector3 waypoint = state.NavigationWaypoints[i];
+            foreach (Vector3 probe in EnumerateRoomGraphWaypointRecoveryProbes(waypoint, botPosition))
+            {
+                checkedCandidates++;
+                if (!TryFindPhysicsFloorPosition(probe, behavior, out Vector3 floorPosition)
+                    || Mathf.Abs(floorPosition.y - waypoint.y) > 1.25f
+                    || !IsSafeTeleportFloor(floorPosition, behavior)
+                    || IsTeleportBodyBlocked(floorPosition, behavior)
+                    || !Room.TryGetRoomAtPosition(floorPosition + Vector3.up * 0.35f, out Room? room)
+                    || room == null
+                    || room.IsDestroyed)
+                {
+                    continue;
+                }
+
+                int progress = Math.Max(0, i - state.NavigationWaypointIndex);
+                float waypointOffset = HorizontalDistance(waypoint, floorPosition);
+                float score = HorizontalDistance(botPosition, floorPosition)
+                    + waypointOffset * 0.45f
+                    - progress * 2.25f;
+                if (score >= bestScore)
+                {
+                    continue;
+                }
+
+                found = true;
+                bestIndex = i;
+                bestScore = score;
+                bestNavPosition = floorPosition;
+            }
+        }
+
+        if (!found)
+        {
+            logNavDebug(
+                bot,
+                state,
+                $"room-graph-waypoint-teleport-no-candidate index={state.NavigationWaypointIndex} checked={checkedCandidates} pos=({botPosition.x:F1},{botPosition.y:F1},{botPosition.z:F1})");
+            return false;
+        }
+
+        bot.Position = ApplyDirectNavPlayerOffset(bestNavPosition, behavior);
+        state.NavigationWaypointIndex = bestIndex + 1;
+        state.LastRoomCenterTeleportTick = nowTick;
+        state.HasDirectNavigationSafePosition = true;
+        state.LastDirectNavigationSafePosition = bestNavPosition;
+        state.LastDirectNavigationMoveTick = nowTick;
+        state.LastMoveIntentLabel = "room-graph-waypoint-teleport";
+        state.LastMoveIntentTick = nowTick;
+        state.LastNavigationReason = "room-graph-waypoint-recovery";
+        logNavDebug(
+            bot,
+            state,
+            $"room-graph-waypoint-teleport index={bestIndex} nextIndex={state.NavigationWaypointIndex} nav=({bestNavPosition.x:F1},{bestNavPosition.y:F1},{bestNavPosition.z:F1}) score={bestScore:F1}");
+        return true;
+    }
+
+    private static IEnumerable<Vector3> EnumerateRoomGraphWaypointRecoveryProbes(Vector3 waypoint, Vector3 botPosition)
+    {
+        yield return waypoint;
+
+        Vector3 towardWaypoint = waypoint - botPosition;
+        towardWaypoint.y = 0f;
+        Vector3 forward = towardWaypoint.sqrMagnitude < 0.0001f
+            ? Vector3.forward
+            : towardWaypoint.normalized;
+        Vector3 right = Vector3.Cross(Vector3.up, forward).normalized;
+
+        float[] distances = { 0.45f, 0.8f, 1.15f };
+        foreach (float distance in distances)
+        {
+            yield return waypoint - forward * distance;
+            yield return waypoint + right * distance;
+            yield return waypoint - right * distance;
+            yield return waypoint + forward * distance;
+        }
+    }
+
     private bool TryTeleportToClosestRoomCenter(
         Player bot,
         ManagedBotState state,
@@ -2767,6 +4225,32 @@ internal sealed class BotControllerService
             || playerTransform.IsChildOf(transform);
     }
 
+    private static bool IsNavigationIgnoredTransform(Player bot, Transform transform)
+    {
+        if (IsPlayerOwnedTransform(bot, transform))
+        {
+            return true;
+        }
+
+        foreach (Player player in Player.List)
+        {
+            if (player == null || player.IsDestroyed || player.GameObject == null)
+            {
+                continue;
+            }
+
+            Transform playerTransform = player.GameObject.transform;
+            if (transform == playerTransform
+                || transform.IsChildOf(playerTransform)
+                || playerTransform.IsChildOf(transform))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static bool TryApplyNavMeshStuckNudge(
         Player bot,
         ManagedBotState state,
@@ -2881,6 +4365,13 @@ internal sealed class BotControllerService
         state.ForwardBlockedUntilTick = 0;
         state.LeftBlockedUntilTick = 0;
         state.RightBlockedUntilTick = 0;
+        state.LocalAvoidanceUntilTick = 0;
+        state.LocalAvoidanceDirection = 0;
+        state.LocalAvoidanceTurnDirection = 0;
+        state.LocalAvoidanceTurnDirectionUntilTick = 0;
+        state.LocalAvoidanceTangent = default;
+        state.LastLocalAvoidanceTurnTick = 0;
+        state.LastLocalAvoidanceLogTick = 0;
         ClearMoveIntent(state);
     }
 
@@ -2934,6 +4425,12 @@ internal sealed class BotControllerService
         if (state.ForwardStallSinceTick == 0
             || unchecked(nowTick - state.ForwardStallSinceTick) < thresholdMs)
         {
+            return;
+        }
+
+        if (ShouldSuppressStuckJumpRecovery(state))
+        {
+            ClearHeldLocalAvoidance(state, flipSide: true);
             return;
         }
 
@@ -3358,9 +4855,16 @@ internal sealed class BotControllerService
             AiMode = behavior.AiMode,
             EnableCombatActions = behavior.EnableCombatActions,
             EnableStepMovement = behavior.EnableStepMovement,
-            EnableObstacleNavigation = behavior.EnableObstacleNavigation,
+            EnablePathNavigation = behavior.EnablePathNavigation,
             UseFacilityNavMesh = behavior.UseFacilityNavMesh,
             UseFacilitySurfaceNavMesh = behavior.UseFacilitySurfaceNavMesh,
+            UseFacilityRoomGraphNavigation = behavior.UseFacilityRoomGraphNavigation,
+            UseFacilityRoomGraphBeamSearch = behavior.UseFacilityRoomGraphBeamSearch,
+            FacilityRoomGraphBeamWidth = behavior.FacilityRoomGraphBeamWidth,
+            FacilityRoomGraphBeamMaxDepth = behavior.FacilityRoomGraphBeamMaxDepth,
+            FacilityRoomGraphDenseGridEnabled = behavior.FacilityRoomGraphDenseGridEnabled,
+            FacilityRoomGraphGridSpacing = behavior.FacilityRoomGraphGridSpacing,
+            FacilityRoomGraphMaxNodesPerRoom = behavior.FacilityRoomGraphMaxNodesPerRoom,
             FacilityNavMeshSampleDistance = behavior.FacilityNavMeshSampleDistance,
             FacilityRuntimeNavMeshEnabled = behavior.FacilityRuntimeNavMeshEnabled,
             FacilitySurfaceRuntimeNavMeshEnabled = behavior.FacilitySurfaceRuntimeNavMeshEnabled,

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using LabApi.Features.Wrappers;
+using ScpslPluginStarter.RepkinsNavigation;
 using UnityEngine;
 using UnityEngine.AI;
 
@@ -15,6 +16,7 @@ internal sealed class BotNavigationService
     private const float WaypointLinkDistance = 8.75f;
     private const float WaypointGoalReachDistance = 1.2f;
     private const float TightWaypointCompletionDistance = 1.45f;
+    private const float RoomGraphWaypointCompletionDistance = 0.85f;
     private const float StuckWaypointSoftAdvanceDistance = 2.4f;
     private const float SkippedStuckWaypointMatchDistance = 0.85f;
     private const int SkippedStuckWaypointMemoryMs = 5000;
@@ -34,6 +36,17 @@ internal sealed class BotNavigationService
 
     private readonly List<Vector3> _arenaWaypoints = new();
     private List<int>[]? _arenaWaypointLinks;
+    private readonly RoomGraphNavigationService _roomGraphNavigationService = new();
+
+    public string RebuildFacilityRoomGraph(BotBehaviorDefinition behavior)
+    {
+        return _roomGraphNavigationService.Rebuild(behavior);
+    }
+
+    public IReadOnlyList<Vector3> GetFacilityRoomGraphDebugNodes(int maxNodes)
+    {
+        return _roomGraphNavigationService.GetDebugNodes(maxNodes);
+    }
 
     public void SetArenaWaypoints(IEnumerable<Vector3> waypoints)
     {
@@ -96,15 +109,15 @@ internal sealed class BotNavigationService
         Action<Player, ManagedBotState, string> logNavDebug)
     {
         state.LastMoveUsedNavigation = false;
-        if (!behavior.EnableObstacleNavigation)
+        if (!behavior.EnablePathNavigation)
         {
-            logNavDebug(bot, state, $"skip reason=obstacle-navigation-disabled target={FormatWaypoint(targetPosition)}");
+            logNavDebug(bot, state, $"skip reason=path-navigation-disabled target={FormatWaypoint(targetPosition)}");
             ClearPath(state, targetPosition, "disabled");
             return targetPosition;
         }
 
         if (useRuntimeNavMesh
-            && TryResolveNavMeshMoveTarget(bot, state, targetPosition, behavior, runtimeNavMeshSampleDistance, useSwiftStyleNavMeshPath, logNavDebug, out Vector3 navMeshTarget))
+            && TryResolveNavMeshMoveTarget(bot, state, targetPosition, behavior, runtimeNavMeshSampleDistance, useSwiftStyleNavMeshPath, players, logNavDebug, out Vector3 navMeshTarget))
         {
             return navMeshTarget;
         }
@@ -201,6 +214,7 @@ internal sealed class BotNavigationService
         state.NavigationPathFailedUntilTick = 0;
         state.LastNavigationReason = reason;
         state.LastMoveUsedNavigation = false;
+        RepkinsFpcMovementRegistry.ResetNavigator(state.PlayerId);
     }
 
     public bool TrySoftAdvanceStuckWaypoint(
@@ -209,6 +223,11 @@ internal sealed class BotNavigationService
         BotBehaviorDefinition behavior,
         Action<Player, ManagedBotState, string> logNavDebug)
     {
+        if (state.LastNavigationReason.StartsWith("room-graph", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
         if (!HasActiveWaypoint(state)
             || state.NavigationWaypointIndex + 1 >= state.NavigationWaypoints.Count)
         {
@@ -395,18 +414,41 @@ internal sealed class BotNavigationService
         return false;
     }
 
-    private static bool TryResolveNavMeshMoveTarget(
+    private bool TryResolveNavMeshMoveTarget(
         Player bot,
         ManagedBotState state,
         Vector3 targetPosition,
         BotBehaviorDefinition behavior,
         float sampleDistance,
         bool useSwiftStyleNavMeshPath,
+        IEnumerable<Player> players,
         Action<Player, ManagedBotState, string> logNavDebug,
         out Vector3 moveTarget)
     {
         moveTarget = targetPosition;
         int nowTick = Environment.TickCount;
+        bool preferFacilityRoomGraph = useSwiftStyleNavMeshPath && behavior.UseFacilityRoomGraphNavigation;
+        if (preferFacilityRoomGraph
+            && TryResolveRoomGraphMoveTarget(
+                bot,
+                state,
+                targetPosition,
+                players,
+                behavior,
+                nowTick,
+                logNavDebug,
+                out moveTarget))
+        {
+            return true;
+        }
+
+        if (preferFacilityRoomGraph)
+        {
+            ClearPath(state, targetPosition, "room-graph-blocked");
+            moveTarget = bot.Position;
+            return true;
+        }
+
         float safeSampleDistance = Mathf.Max(0.25f, sampleDistance);
         bool sampledStart = NavMesh.SamplePosition(bot.Position, out NavMeshHit startHit, safeSampleDistance, NavMesh.AllAreas);
         bool sampledTarget = NavMesh.SamplePosition(targetPosition, out NavMeshHit targetHit, safeSampleDistance, NavMesh.AllAreas);
@@ -457,6 +499,101 @@ internal sealed class BotNavigationService
         return false;
     }
 
+    private bool TryResolveRoomGraphMoveTarget(
+        Player bot,
+        ManagedBotState state,
+        Vector3 targetPosition,
+        IEnumerable<Player> players,
+        BotBehaviorDefinition behavior,
+        int nowTick,
+        Action<Player, ManagedBotState, string> logNavDebug,
+        out Vector3 moveTarget)
+    {
+        moveTarget = targetPosition;
+        bool directClear = IsPathClear(bot.Position, targetPosition, players);
+        if (directClear
+            && HorizontalDistance(bot.Position, targetPosition) <= Mathf.Max(behavior.NavWaypointReachDistance * 2.0f, 2.5f)
+            && Mathf.Abs(bot.Position.y - targetPosition.y) <= MaxWaypointVerticalDelta)
+        {
+            ClearPath(state, targetPosition, "room-graph-close-target");
+            state.LastNavigationTarget = targetPosition;
+            state.LastNavigationRecomputeTick = nowTick;
+            logNavDebug(bot, state, $"room-graph-close target={FormatWaypoint(targetPosition)}");
+            return true;
+        }
+
+        bool targetMoved = GetNavigationTargetDelta(
+            state.LastNavigationTarget,
+            targetPosition,
+            useFull3D: true) >= Mathf.Max(0.25f, behavior.NavTargetMoveRecomputeDistance);
+        int roomGraphRecomputeIntervalMs = Math.Max(1500, behavior.NavRecomputeIntervalMs * 4);
+        bool pathStale = unchecked(nowTick - state.LastNavigationRecomputeTick) >= roomGraphRecomputeIntervalMs;
+        bool needsRoomGraphPath = !state.LastNavigationReason.StartsWith("room-graph", StringComparison.Ordinal);
+        if (!HasActiveWaypoint(state) || targetMoved || pathStale || needsRoomGraphPath)
+        {
+            state.PruneRoomGraphBlockedSegments(nowTick);
+            if (!_roomGraphNavigationService.TryFindPath(
+                    bot.Position,
+                    targetPosition,
+                    behavior,
+                    (start, end) => IsPathClear(start, end, players),
+                    state.RoomGraphBlockedSegments,
+                    nowTick,
+                    out List<Vector3> path,
+                    out string reason))
+            {
+                logNavDebug(
+                    bot,
+                    state,
+                    $"room-graph-failed reason={reason} blocked={state.RoomGraphBlockedSegments.Count} bot={FormatWaypoint(bot.Position)} target={FormatWaypoint(targetPosition)}");
+                ClearPath(state, targetPosition, "room-graph-failed-stop");
+                state.LastNavigationTarget = targetPosition;
+                state.LastNavigationRecomputeTick = nowTick;
+                moveTarget = bot.Position;
+                return true;
+            }
+
+            state.NavigationWaypoints.Clear();
+            foreach (Vector3 waypoint in path)
+            {
+                if (HorizontalDistance(bot.Position, waypoint) <= 0.2f
+                    && Mathf.Abs(bot.Position.y - waypoint.y) <= MaxWaypointVerticalDelta)
+                {
+                    continue;
+                }
+
+                state.NavigationWaypoints.Add(waypoint);
+            }
+
+            state.NavigationWaypointIndex = 0;
+            state.LastNavigationTarget = targetPosition;
+            state.LastNavigationRecomputeTick = nowTick;
+            state.NavigationPathFailedUntilTick = 0;
+            state.LastMoveUsedNavigation = true;
+            state.LastNavigationReason = reason.StartsWith("room-graph-beam", StringComparison.Ordinal)
+                ? "room-graph-findpath-beam"
+                : "room-graph-findpath-astar";
+            logNavDebug(
+                bot,
+                state,
+                $"room-graph-path reason={reason} blocked={state.RoomGraphBlockedSegments.Count} waypoints={state.NavigationWaypoints.Count} target={FormatWaypoint(targetPosition)} path={FormatWaypoints(state.NavigationWaypoints)}");
+        }
+
+        AdvanceRoomGraphWaypoints(
+            bot,
+            state,
+            targetPosition,
+            logNavDebug);
+        if (!HasActiveWaypoint(state))
+        {
+            return false;
+        }
+
+        moveTarget = state.NavigationWaypoints[state.NavigationWaypointIndex];
+        state.LastMoveUsedNavigation = true;
+        return true;
+    }
+
     private static bool TryResolveSwiftStyleNavMeshMoveTarget(
         Player bot,
         ManagedBotState state,
@@ -484,7 +621,26 @@ internal sealed class BotNavigationService
             sampledTarget,
             useFull3D: true) >= Mathf.Max(0.25f, behavior.NavTargetMoveRecomputeDistance);
         bool pathStale = unchecked(nowTick - state.LastNavigationRecomputeTick) >= Math.Max(100, behavior.NavRecomputeIntervalMs);
-        if (!HasActiveWaypoint(state) || targetMoved || pathStale)
+
+        // Validate current path - recalculate if blocked or invalid
+        bool needsRecalculation = !HasActiveWaypoint(state) || targetMoved || pathStale;
+        if (!needsRecalculation && state.NavigationWaypoints.Count > 0)
+        {
+            // Check if current path segment is still valid
+            Vector3 currentWaypoint = state.NavigationWaypoints[state.NavigationWaypointIndex];
+            NavMeshPath validationPath = new();
+            if (!NavMesh.CalculatePath(sampledStart, currentWaypoint, NavMesh.AllAreas, validationPath)
+                || validationPath.status == NavMeshPathStatus.PathInvalid)
+            {
+                needsRecalculation = true;
+                logNavDebug(
+                    bot,
+                    state,
+                    $"swift-path-invalidated waypoint={FormatWaypoint(currentWaypoint)} triggering recalc");
+            }
+        }
+
+        if (needsRecalculation)
         {
             NavMeshPath path = new();
             if (!NavMesh.CalculatePath(sampledStart, sampledTarget, NavMesh.AllAreas, path)
@@ -629,7 +785,12 @@ internal sealed class BotNavigationService
             sampledTarget,
             useFull3D: false) >= Mathf.Max(0.25f, behavior.NavTargetMoveRecomputeDistance);
         bool pathStale = unchecked(nowTick - state.LastNavigationRecomputeTick) >= Math.Max(100, behavior.NavRecomputeIntervalMs);
-        if (!agent.hasPath || targetMoved || pathStale || agent.isPathStale)
+
+        // Check if current path is blocked or invalid - critical for obstacle avoidance
+        bool pathBlocked = agent.hasPath && !agent.pathPending && agent.pathStatus == NavMeshPathStatus.PathPartial;
+        bool pathInvalid = agent.hasPath && !agent.pathPending && agent.pathStatus == NavMeshPathStatus.PathInvalid;
+
+        if (!agent.hasPath || targetMoved || pathStale || agent.isPathStale || pathBlocked || pathInvalid)
         {
             if (!agent.SetDestination(sampledTarget))
             {
@@ -771,7 +932,7 @@ internal sealed class BotNavigationService
     private static void ConfigureNavigationAgent(NavMeshAgent agent, BotBehaviorDefinition behavior)
     {
         agent.baseOffset = 0f;
-        agent.radius = Mathf.Max(0.05f, behavior.FacilityRuntimeNavMeshAgentRadius);
+        agent.radius = Mathf.Max(0.35f, behavior.FacilityRuntimeNavMeshAgentRadius * 1.4f); // Increased for better clearance
         agent.height = Mathf.Max(0.5f, behavior.FacilityRuntimeNavMeshAgentHeight);
         agent.speed = Mathf.Max(2.0f, behavior.FacilityDummyFollowSpeed);
         agent.acceleration = Mathf.Max(12.0f, agent.speed * 6.0f);
@@ -781,7 +942,7 @@ internal sealed class BotNavigationService
         agent.autoRepath = true;
         agent.autoTraverseOffMeshLink = true;
         agent.obstacleAvoidanceType = ObstacleAvoidanceType.HighQualityObstacleAvoidance;
-        agent.avoidancePriority = 40 + Math.Abs(agent.GetInstanceID() % 30);
+        agent.avoidancePriority = 50;
         agent.areaMask = NavMesh.AllAreas;
         agent.updatePosition = true;
         agent.updateRotation = false;
@@ -1666,6 +1827,36 @@ internal sealed class BotNavigationService
         }
     }
 
+    private static void AdvanceRoomGraphWaypoints(
+        Player bot,
+        ManagedBotState state,
+        Vector3 targetPosition,
+        Action<Player, ManagedBotState, string> logNavDebug)
+    {
+        while (HasActiveWaypoint(state))
+        {
+            Vector3 waypoint = state.NavigationWaypoints[state.NavigationWaypointIndex];
+            float waypointDistance = HorizontalDistance(bot.Position, waypoint);
+            float verticalDelta = Mathf.Abs(bot.Position.y - waypoint.y);
+            if (waypointDistance > RoomGraphWaypointCompletionDistance
+                || verticalDelta > MaxWaypointVerticalDelta)
+            {
+                break;
+            }
+
+            logNavDebug(
+                bot,
+                state,
+                $"room-graph-waypoint-reached index={state.NavigationWaypointIndex} point={FormatWaypoint(waypoint)} dist={waypointDistance:F2} yDelta={verticalDelta:F2}");
+            state.NavigationWaypointIndex++;
+        }
+
+        if (!HasActiveWaypoint(state) && state.NavigationWaypoints.Count > 0)
+        {
+            ClearPath(state, targetPosition, "complete");
+        }
+    }
+
     private static bool HasActiveWaypoint(ManagedBotState state)
     {
         return state.NavigationWaypointIndex >= 0
@@ -1724,6 +1915,7 @@ internal sealed class BotNavigationService
         state.LastNavigationTarget = targetPosition;
         state.LastNavigationReason = reason;
         state.LastMoveUsedNavigation = false;
+        RepkinsFpcMovementRegistry.ResetNavigator(state.PlayerId);
     }
 
     private static float HorizontalDistance(Vector3 left, Vector3 right)

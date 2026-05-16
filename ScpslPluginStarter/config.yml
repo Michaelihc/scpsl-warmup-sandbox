@@ -24,13 +24,15 @@ surface_escape_blocker_initial_drain_hp_per_second: 1
 surface_escape_blocker_drain_multiplier_per_second: 2
 surface_escape_blocker_max_drain_percent_per_second: 35
 surface_escape_blocker_warning_text: '<size=36><color=#ff3030><b>请不要堵安全区</b></color></size>'
+safezone_exit_spawn_protection_enabled: true
+safezone_exit_spawn_protection_duration_ms: 10000
 broadcast_warmup_status: true
 broadcast_help_reminder: true
 broadcast_community_reminder: true
 community_reminder_text: '<size=28><color=#00ffff><b>QQ群：897907125</b></color></size>'
 help_reminder_interval_seconds: 45
 help_reminder_duration_seconds: 6
-language: en
+language: cn
 enable_debug_logging: false
 enable_crash_diagnostics_logging: true
 slow_startup_phase_warning_ms: 1000
@@ -79,9 +81,7 @@ text_chat:
   show_sender_console_response: true
 server_audio:
   enabled: true
-  audio_directory_name: server-audio
   default_volume: 0.65
-  max_duration_seconds: 300
   speaker_controller_id: 221
 playtime_tracking:
   enabled: true
@@ -266,18 +266,31 @@ bot_behavior:
   ai_mode: Classic
   enable_combat_actions: true
   enable_step_movement: true
-  enable_obstacle_navigation: true
+  enable_path_navigation: true
   use_facility_nav_mesh: true
   use_facility_surface_nav_mesh: true
+  use_facility_room_graph_navigation: true
+  use_repkins_facility_navigation: true
+  use_facility_room_graph_beam_search: true
+  facility_room_graph_beam_width: 16
+  facility_room_graph_beam_max_depth: 96
+  facility_room_graph_dense_grid_enabled: true
+  facility_room_graph_grid_spacing: 0.75
+  facility_room_graph_max_nodes_per_room: 5000
+  visualize_facility_room_graph: true
+  visualize_bot_navigation_path: true
+  facility_room_graph_max_debug_nodes: 2500
+  facility_room_graph_node_debug_size: 0.22
+  bot_navigation_path_debug_width: 0.08
   facility_nav_mesh_sample_distance: 3.0
-  facility_runtime_nav_mesh_enabled: false
+  facility_runtime_nav_mesh_enabled: true
   facility_surface_runtime_nav_mesh_enabled: true
   facility_runtime_nav_mesh_agent_radius: 0.25
   facility_runtime_nav_mesh_agent_height: 1.8
   facility_runtime_nav_mesh_agent_max_slope: 65.0
   facility_runtime_nav_mesh_agent_climb: 2.4
-  facility_runtime_nav_mesh_use_render_meshes: false
-  facility_runtime_nav_mesh_use_room_templates: false
+  facility_runtime_nav_mesh_use_render_meshes: true
+  facility_runtime_nav_mesh_use_room_templates: true
   facility_runtime_nav_mesh_bounds_padding: 8.0
   facility_runtime_nav_mesh_min_region_area: 0.5
   facility_runtime_nav_mesh_ignore_doors: true

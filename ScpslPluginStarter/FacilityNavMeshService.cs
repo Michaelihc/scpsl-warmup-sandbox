@@ -703,7 +703,7 @@ internal sealed class FacilityNavMeshService
         return new RoomTemplateSourceResult(sourceCount, roomCount, missingRooms);
     }
 
-    private static Dictionary<string, RoomNavTemplate> LoadEmbeddedRoomTemplates()
+    internal static Dictionary<string, RoomNavTemplate> LoadEmbeddedRoomTemplates()
     {
         Assembly assembly = typeof(FacilityNavMeshService).Assembly;
         Dictionary<string, RoomNavTemplate> templates = new(StringComparer.OrdinalIgnoreCase);
@@ -762,7 +762,7 @@ internal sealed class FacilityNavMeshService
             : 0f;
     }
 
-    private static string? ResolveTemplateName(RoomIdentifier room, IReadOnlyDictionary<string, RoomNavTemplate> templates)
+    internal static string? ResolveTemplateName(RoomIdentifier room, IReadOnlyDictionary<string, RoomNavTemplate> templates)
     {
         string objectName = CleanTemplateName(room.gameObject != null ? room.gameObject.name : "");
         if (!string.IsNullOrWhiteSpace(objectName) && templates.ContainsKey(objectName))

@@ -59,6 +59,10 @@ public sealed class PluginConfig
 
     public string SurfaceEscapeBlockerWarningText { get; set; } = "<size=36><color=#ff3030><b>请不要堵安全区</b></color></size>";
 
+    public bool SafezoneExitSpawnProtectionEnabled { get; set; } = true;
+
+    public int SafezoneExitSpawnProtectionDurationMs { get; set; } = 10000;
+
     public bool BroadcastWarmupStatus { get; set; } = true;
 
     public bool BroadcastHelpReminder { get; set; } = true;
@@ -71,7 +75,7 @@ public sealed class PluginConfig
 
     public ushort HelpReminderDurationSeconds { get; set; } = 6;
 
-    public string Language { get; set; } = "en";
+    public string Language { get; set; } = "cn";
 
     public bool EnableDebugLogging { get; set; } = false;
 
@@ -227,11 +231,7 @@ public sealed class ServerAudioConfig
 {
     public bool Enabled { get; set; } = true;
 
-    public string AudioDirectoryName { get; set; } = "server-audio";
-
     public float DefaultVolume { get; set; } = 0.65f;
-
-    public int MaxDurationSeconds { get; set; } = 300;
 
     public byte SpeakerControllerId { get; set; } = 221;
 }
@@ -540,15 +540,41 @@ public sealed class BotBehaviorDefinition
 
     public bool EnableStepMovement { get; set; } = true;
 
-    public bool EnableObstacleNavigation { get; set; } = true;
+    public bool EnablePathNavigation { get; set; } = true;
 
     public bool UseFacilityNavMesh { get; set; } = false;
 
     public bool UseFacilitySurfaceNavMesh { get; set; } = true;
 
+    public bool UseFacilityRoomGraphNavigation { get; set; } = true;
+
+    public bool UseRepkinsFacilityNavigation { get; set; } = true;
+
+    public bool UseFacilityRoomGraphBeamSearch { get; set; } = true;
+
+    public int FacilityRoomGraphBeamWidth { get; set; } = 16;
+
+    public int FacilityRoomGraphBeamMaxDepth { get; set; } = 96;
+
+    public bool FacilityRoomGraphDenseGridEnabled { get; set; } = true;
+
+    public float FacilityRoomGraphGridSpacing { get; set; } = 0.75f;
+
+    public int FacilityRoomGraphMaxNodesPerRoom { get; set; } = 5000;
+
+    public bool VisualizeFacilityRoomGraph { get; set; } = true;
+
+    public bool VisualizeBotNavigationPath { get; set; } = true;
+
+    public int FacilityRoomGraphMaxDebugNodes { get; set; } = 2500;
+
+    public float FacilityRoomGraphNodeDebugSize { get; set; } = 0.22f;
+
+    public float BotNavigationPathDebugWidth { get; set; } = 0.08f;
+
     public float FacilityNavMeshSampleDistance { get; set; } = 3.0f;
 
-    public bool FacilityRuntimeNavMeshEnabled { get; set; } = false;
+    public bool FacilityRuntimeNavMeshEnabled { get; set; } = true;
 
     public bool FacilitySurfaceRuntimeNavMeshEnabled { get; set; } = true;
 
@@ -560,7 +586,7 @@ public sealed class BotBehaviorDefinition
 
     public float FacilityRuntimeNavMeshAgentClimb { get; set; } = 2.4f;
 
-    public bool FacilityRuntimeNavMeshUseRenderMeshes { get; set; } = false;
+    public bool FacilityRuntimeNavMeshUseRenderMeshes { get; set; } = true;
 
     public bool FacilityRuntimeNavMeshUseRoomTemplates { get; set; } = true;
 

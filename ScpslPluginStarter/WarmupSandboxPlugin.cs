@@ -12,6 +12,7 @@ using CommandSystem.Commands.RemoteAdmin.Cleanup;
 using CommandSystem.Commands.RemoteAdmin.Doors;
 using CommandSystem.Commands.RemoteAdmin.Dummies;
 using CustomPlayerEffects;
+using HarmonyLib;
 using InventorySystem.Items;
 using InventorySystem.Items.Firearms.Attachments;
 using InventorySystem.Items.Jailbird;
@@ -29,6 +30,7 @@ using NetworkManagerUtils.Dummies;
 using NorthwoodLib;
 using PlayerRoles;
 using PlayerRoles.PlayableScps.Scp096;
+using ScpslPluginStarter.RepkinsNavigation;
 using UserSettings.ServerSpecific;
 using UnityEngine;
 using UnityEngine.AI;
@@ -51,6 +53,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private const int LiveUpdateSignalPollIntervalMs = 1000;
     private const int SafezoneHealthDrainIntervalMs = 1000;
     private const int DangerousItemProtectionMonitorIntervalMs = 250;
+    private const int AdminWarheadOverrideDurationMs = 10 * 60 * 1000;
     private const float DangerousItemSpawnProtectionTimeLeftSeconds = 4f;
     private const string LiveUpdateSignalFileName = "live-update-warning.txt";
     private const string HotConfigReloadSignalFileName = "hot-reload-config.txt";
@@ -300,12 +303,15 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private readonly List<PrimitiveObjectToyWrapper> _escapeSafezoneVisuals = new();
     private readonly List<TextToyWrapper> _escapeSafezoneLabels = new();
     private readonly HashSet<int> _safezoneDrainDamagePlayerIds = new();
+    private readonly HashSet<int> _playersInEscapeSafezone = new();
     private readonly Dictionary<int, long> _safezoneActionHintTimesMs = new();
     private readonly Dictionary<int, SurfaceEscapeBlockerState> _surfaceEscapeBlockerStates = new();
     private readonly Dictionary<int, PrimitiveObjectToyWrapper> _navAgentDebugToys = new();
+    private readonly Dictionary<int, List<PrimitiveObjectToyWrapper>> _botNavigationPathDebugToys = new();
     private int _botSequence;
     private int _warmupGeneration;
     private int _roundCampDisabledUntilTick;
+    private int _adminWarheadOverrideUntilTick;
     private long _playerBotCountGlobalCooldownUntilMs;
     private long _playerPanelGlobalCooldownUntilMs;
     private ServerSpecificSettingBase[]? _originalServerSpecificSettings;
@@ -324,6 +330,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private int _botSetupStaggerSequence;
     private bool _botPopulationEnsureScheduled;
     private bool _playerPanelItemGrantPumpScheduled;
+    private Harmony? _repkinsNavigationHarmony;
 
     public static WarmupSandboxPlugin? Instance { get; private set; }
     public override string Name => "WarmupSandbox";
@@ -340,6 +347,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         ApplyDifficultyPreset(Config.DifficultyPreset, persist: false);
         ApplyNativeSpawnProtectionConfig();
         _playtimeTrackerService.Enable(Config.PlaytimeTracking);
+        EnableRepkinsNavigation();
         ServerEvents.WaitingForPlayers += OnWaitingForPlayers;
         ServerEvents.RoundStarted += OnRoundStarted;
         ServerEvents.RoundRestarted += OnRoundRestarted;
@@ -353,6 +361,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         PlayerEvents.Hurt += OnPlayerHurt;
         PlayerEvents.UpdatingEffect += OnPlayerUpdatingEffect;
         PlayerEvents.UpdatedEffect += OnPlayerUpdatedEffect;
+        PlayerEvents.SendingVoiceMessage += OnPlayerSendingVoiceMessage;
         PlayerEvents.Left += OnPlayerLeft;
         PlayerEvents.UnlockingWarheadButton += OnPlayerUnlockingWarheadButton;
         PlayerEvents.InteractingWarheadLever += OnPlayerInteractingWarheadLever;
@@ -423,6 +432,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         _playerPanelItemGrantPumpScheduled = false;
         _botPopulationEnsureScheduled = false;
         _warmupActive = false;
+        _playersInEscapeSafezone.Clear();
         ServerAudioPlaybackService.Stop(out _);
         _playtimeTrackerService.Disable();
         CleanupManagedBots();
@@ -463,6 +473,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         PlayerEvents.UpdatedEffect -= OnPlayerUpdatedEffect;
         PlayerEvents.UpdatingEffect -= OnPlayerUpdatingEffect;
         PlayerEvents.Hurt -= OnPlayerHurt;
+        PlayerEvents.SendingVoiceMessage -= OnPlayerSendingVoiceMessage;
         PlayerEvents.Left -= OnPlayerLeft;
         PlayerEvents.Death -= OnPlayerDeath;
         PlayerEvents.Spawned -= OnPlayerSpawned;
@@ -475,7 +486,74 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         ServerEvents.RoundRestarted -= OnRoundRestarted;
         ServerEvents.RoundStarted -= OnRoundStarted;
         ServerEvents.WaitingForPlayers -= OnWaitingForPlayers;
+        DisableRepkinsNavigation();
         ApiLogger.Info($"[{Name}] Disabled.");
+    }
+
+    private void EnableRepkinsNavigation()
+    {
+        try
+        {
+            _repkinsNavigationHarmony = new Harmony($"{Name}.RepkinsNavigation.{DateTime.Now.Ticks}");
+            RepkinsFpcMotorPatches.Apply(_repkinsNavigationHarmony);
+            string pluginPath = FilePath;
+            if (string.IsNullOrWhiteSpace(pluginPath))
+            {
+                pluginPath = typeof(WarmupSandboxPlugin).Assembly.Location;
+            }
+
+            if (string.IsNullOrWhiteSpace(pluginPath))
+            {
+                pluginPath = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    "SCP Secret Laboratory",
+                    "LabAPI",
+                    "plugins",
+                    "7777",
+                    $"{Assembly.GetExecutingAssembly().GetName().Name}.dll");
+            }
+
+            string assemblyDirectory = Path.GetDirectoryName(pluginPath) ?? ".";
+            string navBaseDir = Path.Combine(assemblyDirectory, Path.GetFileNameWithoutExtension(pluginPath));
+            RepkinsNavigationSystem.Instance.Init(navBaseDir);
+            ApiLogger.Info($"[{Name}] Repkins navigation enabled baseDir={navBaseDir}");
+        }
+        catch (Exception ex)
+        {
+            ApiLogger.Error($"[{Name}] Repkins navigation enable failed: {ex}");
+            try
+            {
+                _repkinsNavigationHarmony?.UnpatchAll(_repkinsNavigationHarmony.Id);
+            }
+            catch
+            {
+                // Ignore cleanup failures after a partial Harmony patch.
+            }
+
+            _repkinsNavigationHarmony = null;
+        }
+    }
+
+    private void DisableRepkinsNavigation()
+    {
+        RepkinsNavigationSystem.Instance.Terminate();
+        if (_repkinsNavigationHarmony == null)
+        {
+            return;
+        }
+
+        try
+        {
+            _repkinsNavigationHarmony.UnpatchAll(_repkinsNavigationHarmony.Id);
+        }
+        catch (Exception ex)
+        {
+            ApiLogger.Warn($"[{Name}] Repkins navigation unpatch failed: {ex}");
+        }
+        finally
+        {
+            _repkinsNavigationHarmony = null;
+        }
     }
 
     private void OnWaitingForPlayers()
@@ -519,6 +597,8 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         _warmupGeneration++;
         _warmupActive = false;
         _roundCampDisabledUntilTick = 0;
+        _adminWarheadOverrideUntilTick = 0;
+        _playersInEscapeSafezone.Clear();
         CleanupManagedBots();
         _bombModeService.ResetRuntime();
         CleanupArenaMap(returnHumansToFacility: true);
@@ -565,6 +645,14 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             return;
         }
 
+        if (IsAdminWarheadStart(ev.Player))
+        {
+            _adminWarheadOverrideUntilTick = unchecked(Environment.TickCount + AdminWarheadOverrideDurationMs);
+            ApiLogger.Info($"[{Name}] Admin warhead start allowed by {FormatPlayerSafe(ev.Player)} automatic={ev.IsAutomatic}.");
+            return;
+        }
+
+        ApiLogger.Info($"[{Name}] Warhead start blocked player={FormatPlayerSafe(ev.Player)} automatic={ev.IsAutomatic}.");
         ev.IsAllowed = false;
         TryDisableWarhead();
     }
@@ -576,8 +664,58 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             return;
         }
 
+        if (IsAdminWarheadOverrideActive() || IsAdminOrServerOwner(ev.Player))
+        {
+            _adminWarheadOverrideUntilTick = 0;
+            return;
+        }
+
         ev.IsAllowed = false;
         TryDisableWarhead();
+    }
+
+    private bool IsAdminWarheadStart(Player? player)
+    {
+        return IsAdminOrServerOwner(player) || player == null || IsDedicatedServerPlayer(player);
+    }
+
+    private static bool IsDedicatedServerPlayer(Player? player)
+    {
+        return player != null
+            && player.PlayerId == 1
+            && string.Equals(player.Nickname, "Dedicated Server", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool IsAdminWarheadOverrideActive()
+    {
+        return _adminWarheadOverrideUntilTick != 0
+            && unchecked(_adminWarheadOverrideUntilTick - Environment.TickCount) > 0;
+    }
+
+    private static bool IsAdminOrServerOwner(Player? player)
+    {
+        if (player == null || !player.RemoteAdminAccess)
+        {
+            return false;
+        }
+
+        return IsAdminOrOwnerGroup(player.PermissionsGroupName)
+            || IsAdminOrOwnerGroup(player.GroupName);
+    }
+
+    private static bool IsAdminOrOwnerGroup(string? groupName)
+    {
+        if (string.IsNullOrWhiteSpace(groupName))
+        {
+            return false;
+        }
+
+        string normalized = groupName!.Trim();
+        return string.Equals(normalized, "admin", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(normalized, "owner", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(normalized, "server_owner", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(normalized, "serverowner", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(normalized, "server owner", StringComparison.OrdinalIgnoreCase);
     }
 
     private void OnLczDecontaminationStarting(LczDecontaminationStartingEventArgs ev)
@@ -633,7 +771,9 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
             Warhead.LeverStatus = false;
             Warhead.IsAuthorized = false;
-            Warhead.IsLocked = true;
+            // Keep the warhead unlocked so RA/admin-panel starts can still reach WarheadStarting.
+            // Player-side button/lever usage is blocked by the player interaction handlers above.
+            Warhead.IsLocked = false;
             Warhead.ForceCountdownToggle = false;
             Warhead.DeadManSwitchRemaining = 0f;
         }
@@ -818,6 +958,26 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         SpawnProtected.TryGiveProtection(player.ReferenceHub);
     }
 
+    private void GrantSafezoneExitSpawnProtection(Player player)
+    {
+        int durationMs = Math.Max(0, Config.SafezoneExitSpawnProtectionDurationMs);
+        if (!Config.SafezoneExitSpawnProtectionEnabled
+            || durationMs <= 0
+            || player.ReferenceHub == null)
+        {
+            return;
+        }
+
+        float durationSeconds = Math.Max(0.1f, durationMs / 1000f);
+        SpawnProtected.IsProtectionEnabled = true;
+        SpawnProtected.SpawnDuration = durationSeconds;
+        SpawnProtected.TryGiveProtection(player.ReferenceHub);
+        if (TryGetSpawnProtection(player, out SpawnProtected spawnProtected))
+        {
+            spawnProtected.TimeLeft = durationSeconds;
+        }
+    }
+
     private static void CancelSpawnProtection(Player player)
     {
         if (player.ReferenceHub == null)
@@ -867,6 +1027,13 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     {
         if (!_warmupActive)
         {
+            return;
+        }
+
+        if (IsScp207DrainDamage(ev.DamageHandler))
+        {
+            ev.IsAllowed = false;
+            ZeroDamage(ev.DamageHandler);
             return;
         }
 
@@ -937,6 +1104,12 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
     }
 
+    private static bool IsScp207DrainDamage(PlayerStatsSystem.DamageHandlerBase damageHandler)
+    {
+        return damageHandler is PlayerStatsSystem.UniversalDamageHandler universalDamageHandler
+            && universalDamageHandler.TranslationId == PlayerStatsSystem.DeathTranslations.Scp207.Id;
+    }
+
     private void OnPlayerUpdatingEffect(PlayerEffectUpdatingEventArgs ev)
     {
         if (IsManagedHumanInEscapeSafezone(ev.Player) && IsFlashEffect(ev.Effect))
@@ -955,8 +1128,14 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
     }
 
+    private void OnPlayerSendingVoiceMessage(PlayerSendingVoiceMessageEventArgs ev)
+    {
+        ServerAudioPlaybackService.OnPlayerSendingVoiceMessage(Config, ev);
+    }
+
     private void OnPlayerLeft(PlayerLeftEventArgs ev)
     {
+        ServerAudioPlaybackService.StopIfBroadcaster(ev.Player);
         _playtimeTrackerService.PlayerLeft(ev.Player, Config.PlaytimeTracking);
         _selectedHumanLoadouts.Remove(ev.Player.PlayerId);
         _playerBotCountCooldownUntilMs.Remove(ev.Player.PlayerId);
@@ -976,6 +1155,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         _playerPanelSelectedBotRoles.Remove(ev.Player.PlayerId);
         _playerPanelSelectedRetreatSpeedUnits.Remove(ev.Player.PlayerId);
         _playerPanelSelectedRoomPresets.Remove(ev.Player.PlayerId);
+        _playersInEscapeSafezone.Remove(ev.Player.PlayerId);
         _surfaceEscapeBlockerStates.Remove(ev.Player.PlayerId);
         SchedulePlayerPanelRefresh(sendToPlayers: false, PlayerPanelRefreshDebounceMs);
 
@@ -1226,6 +1406,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         _shotBudgetTokens = 0;
         _shotBudgetLastRefillTick = 0;
         _shotBudgetLastLogTick = 0;
+        _playersInEscapeSafezone.Clear();
         ApiLogger.Info($"[{Name}] Starting warmup sandbox ({reason}).");
         LogCrashDiagnostic(
             $"restart-begin reason={reason} generation={_warmupGeneration} roundStarted={Round.IsRoundStarted} " +
@@ -2031,8 +2212,18 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
     private bool ShouldUseFacilityNavMesh(Player bot)
     {
-        if (!_facilityNavMeshService.HasRuntimeNavMesh
-            || !TryGetClosestRoomZone(bot.Position, out FacilityZone zone))
+        if (!TryGetClosestRoomZone(bot.Position, out FacilityZone zone))
+        {
+            return false;
+        }
+
+        if (Config.BotBehavior.UseRepkinsFacilityNavigation
+            || Config.BotBehavior.UseFacilityRoomGraphNavigation)
+        {
+            return zone != FacilityZone.None;
+        }
+
+        if (!_facilityNavMeshService.HasRuntimeNavMesh)
         {
             return false;
         }
@@ -2422,6 +2613,11 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private static string FormatPlayer(Player player)
     {
         return $"{player.Nickname}#{player.PlayerId}";
+    }
+
+    private static string FormatPlayerSafe(Player? player)
+    {
+        return player == null ? "server-console" : FormatPlayer(player);
     }
 
     private static string FormatActiveAttachments(FirearmItem firearm)
@@ -3763,6 +3959,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         foreach (KeyValuePair<int, ManagedBotState> entry in _managedBots.ToArray())
         {
             int playerId = entry.Key;
+            RepkinsFpcMovementRegistry.ResetNavigator(playerId);
             entry.Value.DestroyNavigationAgent();
             DestroyNavAgentDebugToy(playerId);
             if (Player.TryGet(playerId, out Player bot) && bot.GameObject != null)
@@ -3778,6 +3975,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
 
         _managedBots.Clear();
+        RepkinsFpcMovementRegistry.ClearAll();
         ClearNavAgentDebugVisuals();
         SchedulePlayerPanelRefresh(sendToPlayers: false, PlayerPanelRefreshDebounceMs);
         LogStartupPhase($"cleanup-managed-bots before={before}", stopwatch);
@@ -3802,6 +4000,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
 
         state.DestroyNavigationAgent();
+        RepkinsFpcMovementRegistry.ResetNavigator(playerId);
         DestroyNavAgentDebugToy(playerId);
         if (Player.TryGet(playerId, out Player bot) && bot.GameObject != null)
         {
@@ -3972,6 +4171,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         if (_warmupActive)
         {
             RunSafezoneScp096CalmMonitor();
+            RunSafezoneExitSpawnProtectionMonitor();
         }
 
         if (_warmupActive && Config.SurfaceEscapeBlockerEnabled)
@@ -4006,6 +4206,46 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         }
 
         rageManager.ServerEndEnrage(clearTime: true);
+    }
+
+    private void RunSafezoneExitSpawnProtectionMonitor()
+    {
+        if (!Config.SafezoneExitSpawnProtectionEnabled || Config.SafezoneExitSpawnProtectionDurationMs <= 0)
+        {
+            _playersInEscapeSafezone.Clear();
+            return;
+        }
+
+        HashSet<int> seenPlayerIds = new();
+        foreach (Player player in Player.List.Where(IsManagedHuman))
+        {
+            seenPlayerIds.Add(player.PlayerId);
+            if (!player.IsAlive || player.Role == RoleTypeId.Spectator)
+            {
+                _playersInEscapeSafezone.Remove(player.PlayerId);
+                continue;
+            }
+
+            bool inEscapeSafezone = IsInEscapeSafezone(player);
+            if (inEscapeSafezone)
+            {
+                _playersInEscapeSafezone.Add(player.PlayerId);
+                continue;
+            }
+
+            if (_playersInEscapeSafezone.Remove(player.PlayerId))
+            {
+                GrantSafezoneExitSpawnProtection(player);
+            }
+        }
+
+        foreach (int playerId in _playersInEscapeSafezone.ToArray())
+        {
+            if (!seenPlayerIds.Contains(playerId))
+            {
+                _playersInEscapeSafezone.Remove(playerId);
+            }
+        }
     }
 
     private void RunSurfaceEscapeBlockerMonitor()
@@ -5000,10 +5240,12 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private void UpdateNavAgentDebugVisual(Player bot, ManagedBotState state, bool useNavMesh, bool useDust2Arena)
     {
         DestroyNavAgentDebugToy(bot.PlayerId);
+        UpdateBotNavigationPathDebugVisual(bot, state, useNavMesh, useDust2Arena);
     }
 
     private void DestroyNavAgentDebugToy(int playerId)
     {
+        DestroyBotNavigationPathDebugVisual(playerId);
         if (!_navAgentDebugToys.TryGetValue(playerId, out PrimitiveObjectToyWrapper toy))
         {
             return;
@@ -5021,6 +5263,12 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     {
         DestroyDebugToys(_navAgentDebugToys.Values);
         _navAgentDebugToys.Clear();
+        foreach (List<PrimitiveObjectToyWrapper> toys in _botNavigationPathDebugToys.Values)
+        {
+            DestroyDebugToys(toys);
+        }
+
+        _botNavigationPathDebugToys.Clear();
     }
 
     private void RebuildRuntimeNavMeshDebugVisuals()
@@ -5031,6 +5279,121 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
     private void RebuildFacilityNavMeshDebugVisuals()
     {
         ClearArenaDebugVisuals();
+        if (!Config.BotBehavior.VisualizeFacilityRoomGraph)
+        {
+            return;
+        }
+
+        IReadOnlyList<Vector3> nodes = _botControllerService.GetFacilityRoomGraphDebugNodes(
+            Math.Max(0, Config.BotBehavior.FacilityRoomGraphMaxDebugNodes));
+        float size = Mathf.Max(0.05f, Config.BotBehavior.FacilityRoomGraphNodeDebugSize);
+        foreach (Vector3 node in nodes)
+        {
+            PrimitiveObjectToyWrapper marker = CreateDebugPrimitive(
+                node + (Vector3.up * 0.12f),
+                Quaternion.identity,
+                new Vector3(size, size, size),
+                PrimitiveType.Sphere,
+                new Color(0.1f, 0.85f, 1f, 0.55f));
+            _runtimeNavMeshDebugEdges.Add(marker);
+        }
+
+        if (nodes.Count > 0 && Config.BotBehavior.NavDebugLogging)
+        {
+            ApiLogger.Info($"[{Name}] Facility room graph debug nodes created count={nodes.Count}.");
+        }
+    }
+
+    private void UpdateBotNavigationPathDebugVisual(Player bot, ManagedBotState state, bool useNavMesh, bool useDust2Arena)
+    {
+        DestroyBotNavigationPathDebugVisual(bot.PlayerId);
+        if (useDust2Arena
+            || !useNavMesh
+            || !Config.BotBehavior.VisualizeBotNavigationPath
+            || state.NavigationWaypoints.Count == 0
+            || state.NavigationWaypointIndex < 0
+            || state.NavigationWaypointIndex >= state.NavigationWaypoints.Count)
+        {
+            return;
+        }
+
+        List<PrimitiveObjectToyWrapper> toys = new();
+        _botNavigationPathDebugToys[bot.PlayerId] = toys;
+        float nodeSize = Mathf.Max(0.05f, Config.BotBehavior.FacilityRoomGraphNodeDebugSize * 1.35f);
+        float lineWidth = Mathf.Max(0.025f, Config.BotBehavior.BotNavigationPathDebugWidth);
+        Vector3 previous = bot.Position + (Vector3.up * 0.35f);
+        for (int i = state.NavigationWaypointIndex; i < state.NavigationWaypoints.Count; i++)
+        {
+            Vector3 waypoint = state.NavigationWaypoints[i] + (Vector3.up * 0.35f);
+            Color color = i == state.NavigationWaypointIndex
+                ? new Color(1f, 0.9f, 0.05f, 0.85f)
+                : new Color(0.15f, 1f, 0.35f, 0.65f);
+            toys.Add(CreateDebugPrimitive(
+                waypoint,
+                Quaternion.identity,
+                new Vector3(nodeSize, nodeSize, nodeSize),
+                PrimitiveType.Sphere,
+                color));
+
+            CreateDebugLine(previous, waypoint, lineWidth, color, toys);
+            previous = waypoint;
+        }
+    }
+
+    private void DestroyBotNavigationPathDebugVisual(int playerId)
+    {
+        if (!_botNavigationPathDebugToys.TryGetValue(playerId, out List<PrimitiveObjectToyWrapper> toys))
+        {
+            return;
+        }
+
+        DestroyDebugToys(toys);
+        _botNavigationPathDebugToys.Remove(playerId);
+    }
+
+    private static PrimitiveObjectToyWrapper CreateDebugPrimitive(
+        Vector3 position,
+        Quaternion rotation,
+        Vector3 scale,
+        PrimitiveType type,
+        Color color)
+    {
+        PrimitiveObjectToyWrapper toy = PrimitiveObjectToyWrapper.Create(
+            position,
+            rotation,
+            scale,
+            parent: null,
+            networkSpawn: false);
+        toy.Type = type;
+        toy.Flags = PrimitiveFlags.Visible;
+        toy.Color = color;
+        toy.IsStatic = true;
+        toy.SyncInterval = 0f;
+        toy.Spawn();
+        return toy;
+    }
+
+    private static void CreateDebugLine(
+        Vector3 start,
+        Vector3 end,
+        float width,
+        Color color,
+        ICollection<PrimitiveObjectToyWrapper> toys)
+    {
+        Vector3 delta = end - start;
+        float length = delta.magnitude;
+        if (length < 0.05f)
+        {
+            return;
+        }
+
+        Quaternion rotation = Quaternion.LookRotation(delta.normalized, Vector3.up);
+        toys.Add(CreateDebugPrimitive(
+            start + (delta * 0.5f),
+            rotation,
+            new Vector3(width, width, length),
+            PrimitiveType.Cube,
+            color));
     }
 
     private static void DestroyDebugToys(IEnumerable<PrimitiveObjectToyWrapper> toys)
@@ -5475,6 +5838,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         _playerPanelItemGrantPumpToken++;
         _playerPanelItemGrantQueue.Clear();
         _playerPanelItemGrantPumpScheduled = false;
+        _playersInEscapeSafezone.Clear();
         CleanupManagedBots();
         _bombModeService.ResetRuntime();
         CleanupArenaMap(returnHumansToFacility: true);
@@ -5526,7 +5890,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
             TrimExcessBots();
         }
 
-        RefreshPlayerPanelSettings(sendToPlayers: false);
+        RefreshPlayerPanelSettings(sendToPlayers: !string.Equals(previousLanguage, Config.Language, StringComparison.OrdinalIgnoreCase));
 
         response = $"Warmup config reloaded. bots {previousBotCount}->{Config.BotCount}, maxBots {previousMaxBotCount}->{Config.MaxBotCount}, language {previousLanguage}->{Config.Language}, difficulty {previousDifficulty}->{Config.DifficultyPreset}, aimode {previousAiMode}->{Config.BotBehavior.AiMode}.";
         ApiLogger.Info($"[{Name}] {response}");
@@ -7204,6 +7568,7 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
 
         Config.Language = language;
         WarmupLocalization.SetLanguage(language);
+        RefreshPlayerPanelSettings(sendToPlayers: true);
         response = WarmupLocalization.T($"Language set to {language}.", $"语言已设置为 {language}。");
         return true;
     }
@@ -7413,12 +7778,37 @@ public sealed class WarmupSandboxPlugin : Plugin<PluginConfig>
         _runtimeNavMeshDebugEdges.Clear();
         ClearNavAgentDebugVisuals();
 
+        if (Config.BotBehavior.UseRepkinsFacilityNavigation)
+        {
+            bool loaded = RepkinsNavigationSystem.Instance.TryEnsureLoaded(message =>
+            {
+                if (Config.BotBehavior.NavDebugLogging)
+                {
+                    ApiLogger.Info($"[{Name}] {message}");
+                }
+            });
+            if (Config.BotBehavior.NavDebugLogging || Config.BotBehavior.VisualizeFacilityRoomGraph)
+            {
+                ApiLogger.Info($"[{Name}] Repkins facility navmesh loaded={loaded}.");
+            }
+        }
+
+        if (Config.BotBehavior.UseFacilityRoomGraphNavigation)
+        {
+            string graphResponse = _botControllerService.RebuildFacilityRoomGraph(Config.BotBehavior);
+            if (Config.BotBehavior.NavDebugLogging || Config.BotBehavior.VisualizeFacilityRoomGraph)
+            {
+                ApiLogger.Info($"[{Name}] {graphResponse}");
+            }
+        }
+
         bool fullFacilityEnabled = Config.BotBehavior.UseFacilityNavMesh
             && Config.BotBehavior.FacilityRuntimeNavMeshEnabled;
         bool surfaceEnabled = Config.BotBehavior.UseFacilitySurfaceNavMesh
             && Config.BotBehavior.FacilitySurfaceRuntimeNavMeshEnabled;
         if (!fullFacilityEnabled && !surfaceEnabled)
         {
+            RebuildFacilityNavMeshDebugVisuals();
             LogStartupPhase("facility-navmesh-skip-disabled", stopwatch);
             return;
         }

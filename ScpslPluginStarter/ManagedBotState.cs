@@ -126,6 +126,8 @@ internal sealed class ManagedBotState
 
     public List<UnityEngine.Vector3> NavigationWaypoints { get; } = new();
 
+    public List<RoomGraphBlockedSegment> RoomGraphBlockedSegments { get; } = new();
+
     public int NavigationWaypointIndex { get; set; }
 
     public UnityEngine.Vector3 LastNavigationTarget { get; set; }
@@ -187,6 +189,7 @@ internal sealed class ManagedBotState
     public void ResetNavigationRuntimeState()
     {
         NavigationWaypoints.Clear();
+        RoomGraphBlockedSegments.Clear();
         NavigationWaypointIndex = 0;
         LastNavigationTarget = default;
         LastNavigationRecomputeTick = 0;
@@ -214,10 +217,23 @@ internal sealed class ManagedBotState
         LastNavigationDebugTick = 0;
         LastNavigationExecutionLogTick = 0;
         LastNavigationDebugSummary = "";
+        LocalAvoidanceUntilTick = 0;
+        LocalAvoidanceDirection = 0;
+        LocalAvoidanceTurnDirection = 0;
+        LocalAvoidanceTurnDirectionUntilTick = 0;
+        LocalAvoidanceTangent = default;
+        LastLocalAvoidanceTurnTick = 0;
+        LastLocalAvoidanceLogTick = 0;
         HasPatrolTarget = false;
         PatrolTarget = default;
         PatrolTargetSetTick = 0;
         DestroyNavigationAgent();
+        RepkinsNavigation.RepkinsFpcMovementRegistry.ResetNavigator(PlayerId);
+    }
+
+    public void PruneRoomGraphBlockedSegments(int nowTick)
+    {
+        RoomGraphBlockedSegments.RemoveAll(segment => segment.IsExpired(nowTick));
     }
 
     public void DestroyNavigationAgent()
@@ -250,6 +266,20 @@ internal sealed class ManagedBotState
     public int LeftBlockedUntilTick { get; set; }
 
     public int RightBlockedUntilTick { get; set; }
+
+    public int LocalAvoidanceUntilTick { get; set; }
+
+    public int LocalAvoidanceDirection { get; set; }
+
+    public int LocalAvoidanceTurnDirection { get; set; }
+
+    public int LocalAvoidanceTurnDirectionUntilTick { get; set; }
+
+    public UnityEngine.Vector3 LocalAvoidanceTangent { get; set; }
+
+    public int LastLocalAvoidanceTurnTick { get; set; }
+
+    public int LastLocalAvoidanceLogTick { get; set; }
 
     public BotAiState AiState { get; set; } = BotAiState.Chase;
 
@@ -295,4 +325,25 @@ internal sealed class ManagedBotState
 
     public int PatrolTargetSetTick { get; set; }
 
+}
+
+internal sealed class RoomGraphBlockedSegment
+{
+    public RoomGraphBlockedSegment(UnityEngine.Vector3 from, UnityEngine.Vector3 to, int untilTick)
+    {
+        From = from;
+        To = to;
+        UntilTick = untilTick;
+    }
+
+    public UnityEngine.Vector3 From { get; }
+
+    public UnityEngine.Vector3 To { get; }
+
+    public int UntilTick { get; set; }
+
+    public bool IsExpired(int nowTick)
+    {
+        return unchecked(nowTick - UntilTick) >= 0;
+    }
 }
