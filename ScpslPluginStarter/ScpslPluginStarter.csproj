@@ -43,6 +43,10 @@
       <HintPath>$(ScpslServerManagedDir)\Mirror.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="Pooling">
+      <HintPath>$(ScpslServerManagedDir)\Pooling.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="UnityEngine.CoreModule">
       <HintPath>$(ScpslServerManagedDir)\UnityEngine.CoreModule.dll</HintPath>
       <Private>false</Private>

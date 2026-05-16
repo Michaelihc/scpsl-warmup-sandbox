@@ -20,7 +20,7 @@ public sealed class ModHelpCommand : ICommand
     public bool Execute(ArraySegment<string> arguments, ICommandSender sender, out string response)
     {
         WarmupSandboxPlugin? plugin = WarmupSandboxPlugin.Instance;
-        bool playerPanelEnabled = plugin?.Config.PlayerPanelEnabled ?? false;
+        bool playerPanelEnabled = (plugin?.Config.WarmupEnabled ?? false) && (plugin?.Config.PlayerPanelEnabled ?? false);
         bool textChatEnabled = plugin?.Config.TextChat.Enabled ?? false;
         string chatHelp = textChatEnabled
             ? "Text chat: .pc <message>, .c <message>, .tc <message>, .rc <message>\n"

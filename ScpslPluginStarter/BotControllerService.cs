@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using CustomPlayerEffects;
 using LabApi.Features.Wrappers;
 using MapGeneration;
 using PlayerRoles;
@@ -92,11 +93,17 @@ internal sealed class BotControllerService
         int generation)
     {
         int nowTick = Environment.TickCount;
+        bool canUseScpAttack = BotCombatService.IsSupportedScpAttacker(bot.Role);
+        BotTargetSelection? target = _targetingService.SelectTarget(bot, state, players, behavior, random, isProtectedTarget);
+        if (IsMovementLockedByScp3114Strangle(bot))
+        {
+            HandleMovementLockedTick(bot, state, target, updateFacilityFollower, updateZoomHold);
+            return;
+        }
+
         TryRecoverOutOfBoundsPosition(bot, state, behavior, useDust2Arena, nowTick, logNavDebug);
 
         FirearmItem? firearm = _combatService.EnsureFirearmEquipped(bot);
-        bool canUseScpAttack = BotCombatService.IsSupportedScpAttacker(bot.Role);
-        BotTargetSelection? target = _targetingService.SelectTarget(bot, state, players, behavior, random, isProtectedTarget);
         bool shouldCloseRetreat = UpdateCloseRetreatState(bot, state, target, behavior, canUseScpAttack);
         bool closeRetreatLockActive = IsCloseRetreatLockActive(state, nowTick) || shouldCloseRetreat;
         if (shouldCloseRetreat)
@@ -327,6 +334,49 @@ internal sealed class BotControllerService
                 logNavDebug,
                 nowTick);
         }
+    }
+
+    private static bool ClearCloseRetreatState(ManagedBotState state)
+    {
+        state.CloseRetreatActive = false;
+        state.CloseRetreatUntilTick = 0;
+        state.LastCloseRetreatDirectTick = 0;
+        state.LastCloseRetreatStepDistance = 0f;
+        state.LastCloseRetreatInputRepeatCount = 0;
+        return false;
+    }
+
+    private static bool IsMovementLockedByScp3114Strangle(Player bot)
+    {
+        return bot.TryGetEffect(out Strangled? strangled)
+            && strangled != null
+            && strangled.IsEnabled
+            && strangled.LockMovement;
+    }
+
+    private static void HandleMovementLockedTick(
+        Player bot,
+        ManagedBotState state,
+        BotTargetSelection? target,
+        Func<Player, ManagedBotState, Player?, bool, bool> updateFacilityFollower,
+        Action<Player, ManagedBotState, BotTargetSelection?> updateZoomHold)
+    {
+        UpdateTargetSummary(state, target);
+        updateFacilityFollower(bot, state, null, false);
+        updateZoomHold(bot, state, null);
+        StopMovementForExternalLock(state, "strangled");
+    }
+
+    private static void StopMovementForExternalLock(ManagedBotState state, string reason)
+    {
+        ClearCloseRetreatState(state);
+        state.HasPatrolTarget = false;
+        state.ReactiveStrafeUntilTick = 0;
+        state.NavigationWaypoints.Clear();
+        state.NavigationWaypointIndex = 0;
+        state.LastMoveUsedNavigation = false;
+        state.LastMoveIntentLabel = reason;
+        state.LastNavigationReason = reason;
     }
 
     private bool TryPatrolWithoutTarget(

@@ -22,7 +22,13 @@ internal sealed class ManagedBotState
 
     public bool SpawnSetupCompleted { get; set; }
 
+    public bool SpawnSetupScheduled { get; set; }
+
+    public int SpawnSetupToken { get; set; }
+
     public RoleTypeId RespawnRole { get; set; } = RoleTypeId.None;
+
+    public bool OneTime { get; set; }
 
     public int StrafeDirection { get; set; } = 1;
 

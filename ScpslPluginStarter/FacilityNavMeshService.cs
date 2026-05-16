@@ -1234,10 +1234,19 @@ internal sealed class FacilityNavMeshService
 
     private static Bounds BuildSceneBounds(float padding)
     {
+        List<Vector3> anchors = BuildDebugAnchors();
         Bounds? bounds = null;
+        foreach (Vector3 anchor in anchors)
+        {
+            bounds = Encapsulate(bounds, new Bounds(anchor, new Vector3(24f, 20f, 24f)));
+        }
+
         foreach (Collider collider in Object.FindObjectsByType<Collider>(FindObjectsSortMode.None))
         {
-            if (collider == null || !collider.enabled || ShouldIgnoreBounds(collider.transform))
+            if (collider == null
+                || !collider.enabled
+                || ShouldIgnoreBounds(collider.transform)
+                || !IsNearAnyAnchor(collider.bounds, anchors, 140f, 120f))
             {
                 continue;
             }
@@ -1247,7 +1256,10 @@ internal sealed class FacilityNavMeshService
 
         foreach (Renderer renderer in Object.FindObjectsByType<Renderer>(FindObjectsSortMode.None))
         {
-            if (renderer == null || !renderer.enabled || ShouldIgnoreBounds(renderer.transform))
+            if (renderer == null
+                || !renderer.enabled
+                || ShouldIgnoreBounds(renderer.transform)
+                || !IsNearAnyAnchor(renderer.bounds, anchors, 140f, 120f))
             {
                 continue;
             }

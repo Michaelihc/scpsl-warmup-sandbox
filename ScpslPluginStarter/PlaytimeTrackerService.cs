@@ -9,7 +9,7 @@ namespace ScpslPluginStarter;
 
 internal sealed class PlaytimeTrackerService
 {
-    private const string Header = "user_id\tnickname\ttotal_seconds\tsession_count\tlast_join_utc\tlast_seen_utc";
+    private const string Header = "user_id\tnickname\ttotal_seconds\tsession_count\tfirst_join_utc\tlast_join_utc\tlast_seen_utc";
     private readonly Dictionary<string, PlaytimeRecord> _records = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<int, ActivePlaytimeSession> _activeSessions = new();
     private string? _dataPath;
@@ -46,6 +46,11 @@ internal sealed class PlaytimeTrackerService
         PlaytimeRecord record = GetOrCreateRecord(userId);
         record.Nickname = Sanitize(player.Nickname);
         record.SessionCount++;
+        if (record.FirstJoinUtc == DateTimeOffset.MinValue)
+        {
+            record.FirstJoinUtc = now;
+        }
+
         record.LastJoinUtc = now;
         record.LastSeenUtc = now;
         _activeSessions[player.PlayerId] = new ActivePlaytimeSession(player.PlayerId, userId, now, now);
@@ -89,6 +94,7 @@ internal sealed class PlaytimeTrackerService
         FlushActiveSessions(DateTimeOffset.UtcNow);
         Save();
 
+        string summary = BuildSummary();
         List<PlaytimeRecord> records = _records.Values
             .OrderByDescending(record => record.TotalSeconds)
             .ThenBy(record => record.UserId, StringComparer.OrdinalIgnoreCase)
@@ -97,13 +103,38 @@ internal sealed class PlaytimeTrackerService
 
         if (records.Count == 0)
         {
-            return WarmupLocalization.T("No playtime has been tracked yet.", "尚未记录游玩时长。");
+            return summary + "\n" + WarmupLocalization.T("No playtime has been tracked yet.", "尚未记录游玩时长。");
         }
 
-        return string.Join(
+        string leaderboard = string.Join(
             "\n",
             records.Select((record, index) =>
                 $"{index + 1}. {FormatHours(record.TotalSeconds)}h {record.Nickname} ({record.UserId}) sessions={record.SessionCount}"));
+        return summary + "\n" + leaderboard;
+    }
+
+    public string BuildSummaryReport()
+    {
+        FlushActiveSessions(DateTimeOffset.UtcNow);
+        Save();
+        return BuildSummary();
+    }
+
+    private string BuildSummary()
+    {
+        int totalPlayers = _records.Count;
+        int totalSessions = _records.Values.Sum(record => Math.Max(0, record.SessionCount));
+        double totalSeconds = _records.Values.Sum(record => Math.Max(0d, record.TotalSeconds));
+        int activePlayers = _activeSessions.Count;
+        double averageHours = totalPlayers <= 0 ? 0d : totalSeconds / 3600d / totalPlayers;
+        DateTimeOffset lastSeen = _records.Values
+            .Select(record => record.LastSeenUtc)
+            .DefaultIfEmpty(DateTimeOffset.MinValue)
+            .Max();
+
+        return WarmupLocalization.T(
+            $"Player stats: unique_players={totalPlayers}, total_hours={FormatHours(totalSeconds)}h, sessions={totalSessions}, active_now={activePlayers}, avg_hours_per_player={averageHours:F2}, last_seen_utc={FormatDisplayTime(lastSeen)}",
+            $"玩家统计：总玩家={totalPlayers}，总游玩={FormatHours(totalSeconds)}小时，会话={totalSessions}，当前在线={activePlayers}，人均={averageHours:F2}小时，最后在线UTC={FormatDisplayTime(lastSeen)}");
     }
 
     private void FlushActiveSessions(DateTimeOffset now)
@@ -164,14 +195,22 @@ internal sealed class PlaytimeTrackerService
                 continue;
             }
 
+            bool hasFirstJoin = parts.Length >= 7;
             PlaytimeRecord record = new(Unescape(parts[0]))
             {
                 Nickname = Unescape(parts[1]),
                 TotalSeconds = ParseDouble(parts[2]),
                 SessionCount = ParseInt(parts[3]),
-                LastJoinUtc = ParseTime(parts[4]),
-                LastSeenUtc = ParseTime(parts[5]),
+                FirstJoinUtc = ParseTime(parts[4]),
+                LastJoinUtc = hasFirstJoin ? ParseTime(parts[5]) : ParseTime(parts[4]),
+                LastSeenUtc = hasFirstJoin ? ParseTime(parts[6]) : ParseTime(parts[5]),
             };
+
+            if (record.FirstJoinUtc == DateTimeOffset.MinValue)
+            {
+                record.FirstJoinUtc = record.LastJoinUtc;
+            }
+
             _records[record.UserId] = record;
         }
     }
@@ -201,6 +240,7 @@ internal sealed class PlaytimeTrackerService
                     Escape(record.Nickname),
                     record.TotalSeconds.ToString("F3", CultureInfo.InvariantCulture),
                     record.SessionCount.ToString(CultureInfo.InvariantCulture),
+                    FormatTime(record.FirstJoinUtc),
                     FormatTime(record.LastJoinUtc),
                     FormatTime(record.LastSeenUtc)));
             }
@@ -289,6 +329,11 @@ internal sealed class PlaytimeTrackerService
         return (totalSeconds / 3600d).ToString("F2", CultureInfo.InvariantCulture);
     }
 
+    private static string FormatDisplayTime(DateTimeOffset value)
+    {
+        return value == DateTimeOffset.MinValue ? "n/a" : value.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+    }
+
     private sealed class PlaytimeRecord
     {
         public PlaytimeRecord(string userId)
@@ -303,6 +348,8 @@ internal sealed class PlaytimeTrackerService
         public double TotalSeconds { get; set; }
 
         public int SessionCount { get; set; }
+
+        public DateTimeOffset FirstJoinUtc { get; set; } = DateTimeOffset.MinValue;
 
         public DateTimeOffset LastJoinUtc { get; set; } = DateTimeOffset.MinValue;
 

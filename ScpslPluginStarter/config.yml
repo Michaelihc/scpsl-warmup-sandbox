@@ -1,3 +1,4 @@
+warmup_enabled: true
 auto_start_on_waiting_for_players: false
 auto_start_on_first_player: false
 auto_start_on_round_started: true
@@ -9,10 +10,20 @@ surface_escape_safezone_max_z: -17
 surface_escape_safezone_axis: z
 surface_escape_safezone_less_than: false
 surface_escape_safezone_min_x: 91
-surface_escape_safezone_health_drain_enabled: true
+surface_escape_safezone_health_drain_enabled: false
 surface_escape_safezone_health_drain_percent_per_second: 0.5
 surface_escape_safezone_health_drain_warning_enabled: true
 surface_escape_safezone_health_drain_warning_text: '<color=#ff6060>安全区内每秒损失 {percent}% 最大生命值</color>'
+surface_escape_blocker_enabled: true
+surface_escape_blocker_min_z: -26
+surface_escape_blocker_grace_seconds: 3
+surface_escape_blocker_reset_seconds: 60
+surface_escape_blocker_full_drain_seconds: 30
+surface_escape_blocker_drain_half_life_seconds: 10
+surface_escape_blocker_initial_drain_hp_per_second: 1
+surface_escape_blocker_drain_multiplier_per_second: 2
+surface_escape_blocker_max_drain_percent_per_second: 35
+surface_escape_blocker_warning_text: '<size=36><color=#ff3030><b>请不要堵安全区</b></color></size>'
 broadcast_warmup_status: true
 broadcast_help_reminder: true
 broadcast_community_reminder: true
@@ -21,6 +32,8 @@ help_reminder_interval_seconds: 45
 help_reminder_duration_seconds: 6
 language: en
 enable_debug_logging: false
+enable_crash_diagnostics_logging: true
+slow_startup_phase_warning_ms: 1000
 enable_verbose_bot_logging: false
 enable_attachment_logging: false
 enable_arena_logging: false
@@ -38,6 +51,19 @@ player_panel_use_window_seconds: 20
 player_panel_global_cooldown_seconds: 60
 player_panel_cooldown_seconds: 180
 player_panel_cooldown_jitter_seconds: 60
+player_panel_item_queue_enabled: true
+player_panel_item_queue_grant_interval_ms: 150
+player_panel_item_queue_backpressure_delay_ms: 1000
+player_panel_item_queue_max_pending_per_actor: 3
+player_panel_item_cooldowns:
+- item: GrenadeFlash
+  cooldown_seconds: 60
+- item: ParticleDisruptor
+  cooldown_seconds: 30
+- item: MicroHID
+  cooldown_seconds: 30
+- item: SCP2176
+  cooldown_seconds: 30
 text_chat:
   enabled: true
   allow_public_chat: true
@@ -51,6 +77,12 @@ text_chat:
   hint_duration_seconds: 10.0
   max_message_length: 160
   show_sender_console_response: true
+server_audio:
+  enabled: true
+  audio_directory_name: server-audio
+  default_volume: 0.65
+  max_duration_seconds: 300
+  speaker_controller_id: 221
 playtime_tracking:
   enabled: true
   data_file_name: playtime.tsv
@@ -70,6 +102,9 @@ human_respawn_delay_ms: 1200
 bot_respawn_delay_ms: 2500
 bot_spawn_delay_ms: 5000
 bot_role_assign_delay_ms: 1000
+bot_spawn_batch_size: 2
+bot_spawn_stagger_ms: 150
+bot_setup_stagger_ms: 150
 bot_initial_activation_delay_ms: 700
 bot_activation_retry_delay_ms: 450
 bot_activation_max_attempts: 6
@@ -235,18 +270,18 @@ bot_behavior:
   use_facility_nav_mesh: true
   use_facility_surface_nav_mesh: true
   facility_nav_mesh_sample_distance: 3.0
-  facility_runtime_nav_mesh_enabled: true
+  facility_runtime_nav_mesh_enabled: false
   facility_surface_runtime_nav_mesh_enabled: true
   facility_runtime_nav_mesh_agent_radius: 0.25
   facility_runtime_nav_mesh_agent_height: 1.8
   facility_runtime_nav_mesh_agent_max_slope: 65.0
   facility_runtime_nav_mesh_agent_climb: 2.4
   facility_runtime_nav_mesh_use_render_meshes: false
-  facility_runtime_nav_mesh_use_room_templates: true
+  facility_runtime_nav_mesh_use_room_templates: false
   facility_runtime_nav_mesh_bounds_padding: 8.0
   facility_runtime_nav_mesh_min_region_area: 0.5
   facility_runtime_nav_mesh_ignore_doors: true
-  facility_runtime_nav_mesh_log_build: true
+  facility_runtime_nav_mesh_log_build: false
   facility_runtime_nav_mesh_create_off_mesh_links: false
   facility_runtime_nav_mesh_max_off_mesh_links: 600
   facility_runtime_nav_mesh_off_mesh_link_search_radius: 3.0
@@ -391,6 +426,9 @@ bot_behavior:
   shoot_press_action_name: Shoot->Click
   shoot_release_action_name: Shoot->Release
   alternate_shoot_press_action_name: ""
+  global_shot_budget_per_second: 18
+  global_shot_budget_burst: 6
+  global_shot_budget_cooldown_log_ms: 1000
   reload_action_name: Reload->Click
   zoom_action_name: Zoom->Hold
   zoom_release_action_name: Zoom->Release

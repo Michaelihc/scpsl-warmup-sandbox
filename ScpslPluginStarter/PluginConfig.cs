@@ -7,6 +7,8 @@ namespace ScpslPluginStarter;
 
 public sealed class PluginConfig
 {
+    public bool WarmupEnabled { get; set; } = true;
+
     public bool AutoStartOnWaitingForPlayers { get; set; } = false;
 
     public bool AutoStartOnFirstPlayer { get; set; } = false;
@@ -37,6 +39,26 @@ public sealed class PluginConfig
 
     public string SurfaceEscapeSafezoneHealthDrainWarningText { get; set; } = "<color=#ff6060>安全区内每秒损失 {percent}% 最大生命值</color>";
 
+    public bool SurfaceEscapeBlockerEnabled { get; set; } = true;
+
+    public float SurfaceEscapeBlockerMinZ { get; set; } = -26f;
+
+    public int SurfaceEscapeBlockerGraceSeconds { get; set; } = 3;
+
+    public int SurfaceEscapeBlockerResetSeconds { get; set; } = 60;
+
+    public int SurfaceEscapeBlockerFullDrainSeconds { get; set; } = 30;
+
+    public float SurfaceEscapeBlockerDrainHalfLifeSeconds { get; set; } = 10f;
+
+    public float SurfaceEscapeBlockerInitialDrainHpPerSecond { get; set; } = 1f;
+
+    public float SurfaceEscapeBlockerDrainMultiplierPerSecond { get; set; } = 2f;
+
+    public float SurfaceEscapeBlockerMaxDrainPercentPerSecond { get; set; } = 35f;
+
+    public string SurfaceEscapeBlockerWarningText { get; set; } = "<size=36><color=#ff3030><b>请不要堵安全区</b></color></size>";
+
     public bool BroadcastWarmupStatus { get; set; } = true;
 
     public bool BroadcastHelpReminder { get; set; } = true;
@@ -52,6 +74,10 @@ public sealed class PluginConfig
     public string Language { get; set; } = "en";
 
     public bool EnableDebugLogging { get; set; } = false;
+
+    public bool EnableCrashDiagnosticsLogging { get; set; } = true;
+
+    public int SlowStartupPhaseWarningMs { get; set; } = 1000;
 
     public bool EnableVerboseBotLogging { get; set; } = false;
 
@@ -87,7 +113,25 @@ public sealed class PluginConfig
 
     public int PlayerPanelCooldownJitterSeconds { get; set; } = 60;
 
+    public bool PlayerPanelItemQueueEnabled { get; set; } = true;
+
+    public int PlayerPanelItemQueueGrantIntervalMs { get; set; } = 150;
+
+    public int PlayerPanelItemQueueBackpressureDelayMs { get; set; } = 1000;
+
+    public int PlayerPanelItemQueueMaxPendingPerActor { get; set; } = 3;
+
+    public PlayerPanelItemCooldownDefinition[] PlayerPanelItemCooldowns { get; set; } =
+    {
+        new() { Item = ItemType.GrenadeFlash, CooldownSeconds = 60 },
+        new() { Item = ItemType.ParticleDisruptor, CooldownSeconds = 30 },
+        new() { Item = ItemType.MicroHID, CooldownSeconds = 30 },
+        new() { Item = ItemType.SCP2176, CooldownSeconds = 30 },
+    };
+
     public TextChatConfig TextChat { get; set; } = new();
+
+    public ServerAudioConfig ServerAudio { get; set; } = new();
 
     public PlaytimeTrackingConfig PlaytimeTracking { get; set; } = new();
 
@@ -120,6 +164,12 @@ public sealed class PluginConfig
     public int BotSpawnDelayMs { get; set; } = 5000;
 
     public int BotRoleAssignDelayMs { get; set; } = 1000;
+
+    public int BotSpawnBatchSize { get; set; } = 2;
+
+    public int BotSpawnStaggerMs { get; set; } = 150;
+
+    public int BotSetupStaggerMs { get; set; } = 150;
 
     public int BotInitialActivationDelayMs { get; set; } = 700;
 
@@ -173,6 +223,19 @@ public sealed class TextChatConfig
     public bool ShowSenderConsoleResponse { get; set; } = true;
 }
 
+public sealed class ServerAudioConfig
+{
+    public bool Enabled { get; set; } = true;
+
+    public string AudioDirectoryName { get; set; } = "server-audio";
+
+    public float DefaultVolume { get; set; } = 0.65f;
+
+    public int MaxDurationSeconds { get; set; } = 300;
+
+    public byte SpeakerControllerId { get; set; } = 221;
+}
+
 public sealed class PlaytimeTrackingConfig
 {
     public bool Enabled { get; set; } = true;
@@ -180,6 +243,13 @@ public sealed class PlaytimeTrackingConfig
     public string DataFileName { get; set; } = "playtime.tsv";
 
     public int FlushIntervalSeconds { get; set; } = 60;
+}
+
+public sealed class PlayerPanelItemCooldownDefinition
+{
+    public ItemType Item { get; set; } = ItemType.None;
+
+    public int CooldownSeconds { get; set; } = 30;
 }
 
 public enum WarmupDifficulty
@@ -645,6 +715,12 @@ public sealed class BotBehaviorDefinition
     public int ThinkIntervalMaxMs { get; set; } = 850;
 
     public int MinShotIntervalMs { get; set; } = 140;
+
+    public int GlobalShotBudgetPerSecond { get; set; } = 18;
+
+    public int GlobalShotBudgetBurst { get; set; } = 6;
+
+    public int GlobalShotBudgetCooldownLogMs { get; set; } = 1000;
 
     public int MinReloadAttemptIntervalMs { get; set; } = 450;
 

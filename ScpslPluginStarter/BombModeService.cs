@@ -556,6 +556,7 @@ internal sealed class BombModeService
 
 internal enum WarmupRoundMode
 {
+    None,
     Standard,
     Bomb,
 }

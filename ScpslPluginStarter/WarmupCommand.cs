@@ -2,6 +2,7 @@ using System;
 using System.Linq;
 using CommandSystem;
 using LabApi.Features.Wrappers;
+using PlayerRoles;
 using ICommand = CommandSystem.ICommand;
 
 namespace ScpslPluginStarter;
@@ -47,6 +48,18 @@ public sealed class WarmupCommand : ICommand
                 response = plugin.BuildStatus();
                 return true;
 
+            case "enable":
+            case "on":
+                return plugin.SetWarmupEnabled(true, out response);
+
+            case "disable":
+            case "off":
+            case "vanilla":
+                return plugin.SetWarmupEnabled(false, out response);
+
+            case "toggle":
+                return plugin.SetWarmupEnabled(!plugin.Config.WarmupEnabled, out response);
+
             case "playtime":
                 int limit = 10;
                 if (arguments.Count >= 2 && (!int.TryParse(GetArgument(arguments, 1), out limit) || limit <= 0))
@@ -60,8 +73,20 @@ public sealed class WarmupCommand : ICommand
                 response = plugin.BuildPlaytimeReport(limit);
                 return true;
 
+            case "stats":
+            case "playerstats":
+            case "serverstats":
+                response = plugin.BuildPlaytimeSummaryReport();
+                return true;
+
             case "start":
                 return plugin.StartRoundIfNeeded(out response);
+
+            case "spawn":
+            case "spawnbot":
+            case "addbot":
+            case "onetime":
+                return SpawnOneTimeBots(plugin, arguments, out response);
 
             case "restart":
                 return plugin.RestartWarmupFromCommand(ensureRoundStarted: true, out response);
@@ -157,8 +182,8 @@ public sealed class WarmupCommand : ICommand
                 if (arguments.Count < 2)
                 {
                     response = WarmupLocalization.T(
-                        "Usage: bots mode <standard|bomb>",
-                        "用法：bots mode <standard|bomb>");
+                        "Usage: bots mode <none|standard|bomb>",
+                        "用法：bots mode <none|standard|bomb>");
                     return false;
                 }
 
@@ -176,8 +201,8 @@ public sealed class WarmupCommand : ICommand
                 if (arguments.Count < 2)
                 {
                     response = WarmupLocalization.T(
-                        "Usage: bots map <bomb|standard|true|false>",
-                        "用法：bots map <bomb|standard|true|false>");
+                        "Usage: bots map <none|bomb|standard|true|false>",
+                        "用法：bots map <none|bomb|standard|true|false>");
                     return false;
                 }
 
@@ -185,6 +210,13 @@ public sealed class WarmupCommand : ICommand
                 if (mapValue.Equals("bomb", StringComparison.OrdinalIgnoreCase))
                 {
                     return SetRoundModeAndSave(plugin, "bomb", out response);
+                }
+
+                if (mapValue.Equals("none", StringComparison.OrdinalIgnoreCase)
+                    || mapValue.Equals("vanilla", StringComparison.OrdinalIgnoreCase)
+                    || mapValue.Equals("off", StringComparison.OrdinalIgnoreCase))
+                {
+                    return SetRoundModeAndSave(plugin, "none", out response);
                 }
 
                 if (mapValue.Equals("standard", StringComparison.OrdinalIgnoreCase)
@@ -196,8 +228,8 @@ public sealed class WarmupCommand : ICommand
                 if (!bool.TryParse(mapValue, out bool mapEnabled))
                 {
                     response = WarmupLocalization.T(
-                        "Usage: bots map <bomb|standard|true|false>",
-                        "用法：bots map <bomb|standard|true|false>");
+                        "Usage: bots map <none|bomb|standard|true|false>",
+                        "用法：bots map <none|bomb|standard|true|false>");
                     return false;
                 }
 
@@ -218,8 +250,8 @@ public sealed class WarmupCommand : ICommand
                 if (arguments.Count < 3)
                 {
                     response = WarmupLocalization.T(
-                        "Usage: bots set <count> OR bots set <bots|maxbots|maxplayerbots|humanrespawn|botrespawn|humanrole|botrole|forceroundstart|suppressroundend|mode|map|keepmagfilled|aimode|language|retreatspeed|speed|939speed|3114speed|049speed|106speed> <value>",
-                        "用法：bots set <数量> 或 bots set <bots|maxbots|maxplayerbots|humanrespawn|botrespawn|humanrole|botrole|forceroundstart|suppressroundend|mode|map|keepmagfilled|aimode|language|retreatspeed|speed|939speed|3114speed|049speed|106speed> <值>");
+                        "Usage: bots set <count> OR bots set <enabled|bots|maxbots|maxplayerbots|humanrespawn|botrespawn|humanrole|botrole|forceroundstart|suppressroundend|mode|map|keepmagfilled|aimode|language|retreatspeed|speed|939speed|3114speed|049speed|106speed> <value>",
+                        "用法：bots set <数量> 或 bots set <enabled|bots|maxbots|maxplayerbots|humanrespawn|botrespawn|humanrole|botrole|forceroundstart|suppressroundend|mode|map|keepmagfilled|aimode|language|retreatspeed|speed|939speed|3114speed|049speed|106speed> <值>");
                     return false;
                 }
 
@@ -274,6 +306,48 @@ public sealed class WarmupCommand : ICommand
 
         string message = JoinArguments(arguments, messageStartIndex);
         return plugin.BroadcastLiveUpdateWarning(seconds, message, out response);
+    }
+
+    private static bool SpawnOneTimeBots(WarmupSandboxPlugin plugin, ArraySegment<string> arguments, out string response)
+    {
+        int count = 1;
+        RoleTypeId? role = null;
+
+        if (arguments.Count >= 2)
+        {
+            string first = GetArgument(arguments, 1);
+            if (int.TryParse(first, out int parsedCount))
+            {
+                count = parsedCount;
+                if (arguments.Count >= 3)
+                {
+                    string roleName = GetArgument(arguments, 2);
+                    if (!Enum.TryParse(roleName, true, out RoleTypeId parsedRole) || parsedRole is RoleTypeId.None or RoleTypeId.Spectator)
+                    {
+                        response = WarmupLocalization.T(
+                            $"Unknown bot role '{roleName}'.",
+                            $"未知机器人阵营 '{roleName}'。");
+                        return false;
+                    }
+
+                    role = parsedRole;
+                }
+            }
+            else
+            {
+                if (!Enum.TryParse(first, true, out RoleTypeId parsedRole) || parsedRole is RoleTypeId.None or RoleTypeId.Spectator)
+                {
+                    response = WarmupLocalization.T(
+                        "Usage: bots spawn [count] [role]",
+                        "用法：bots spawn [数量] [阵营]");
+                    return false;
+                }
+
+                role = parsedRole;
+            }
+        }
+
+        return plugin.SpawnOneTimeBotsFromCommand(count, role, out response);
     }
 
     private static string JoinArguments(ArraySegment<string> arguments, int startIndex)
@@ -355,8 +429,8 @@ public sealed class WarmupCommand : ICommand
     private static string BuildHelp()
     {
         return WarmupLocalization.T(
-            "bots status | playtime [limit] | updatewarning [seconds] [message] | start | restart | roundrestart | stop | save | reloadconfig | set <count> | setcount <count> | set maxbots <count> | set maxplayerbots <count> | set939speed <speed> | set3114speed <speed> | set049speed <speed> | set106speed <speed> | setspeed <speed> | setretreatspeed <scale> | map <bomb|standard|true|false> | difficulty <easy|normal|hard|hardest> | aimode <classic|realistic> | language <en|cn> | set retreatspeed <scale> | set <key> <value>",
-            "bots status | playtime [limit] | updatewarning [秒数] [消息] | start | restart | roundrestart | stop | save | reloadconfig | set <数量> | setcount <数量> | set maxbots <数量> | set maxplayerbots <数量> | set939speed <速度> | set3114speed <速度> | set049speed <速度> | set106speed <速度> | setspeed <速度> | setretreatspeed <倍率> | map <bomb|standard|true|false> | difficulty <easy|normal|hard|hardest> | aimode <classic|realistic> | language <en|cn> | set retreatspeed <倍率> | set <键> <值>");
+            "bots status | spawn [count] [role] | enable | disable | toggle | stats | playtime [limit] | updatewarning [seconds] [message] | start | restart | roundrestart | stop | save | reloadconfig | set <count> | setcount <count> | set maxbots <count> | set maxplayerbots <count> | set939speed <speed> | set3114speed <speed> | set049speed <speed> | set106speed <speed> | setspeed <speed> | setretreatspeed <scale> | mode <none|standard|bomb> | map <none|bomb|standard|true|false> | difficulty <easy|normal|hard|hardest> | aimode <classic|realistic> | language <en|cn> | set retreatspeed <scale> | set <key> <value>",
+            "bots status | spawn [数量] [阵营] | enable | disable | toggle | stats | playtime [limit] | updatewarning [秒数] [消息] | start | restart | roundrestart | stop | save | reloadconfig | set <数量> | setcount <数量> | set maxbots <数量> | set maxplayerbots <数量> | set939speed <速度> | set3114speed <速度> | set049speed <速度> | set106speed <速度> | setspeed <速度> | setretreatspeed <倍率> | mode <none|standard|bomb> | map <none|bomb|standard|true|false> | difficulty <easy|normal|hard|hardest> | aimode <classic|realistic> | language <en|cn> | set retreatspeed <倍率> | set <键> <值>");
     }
 
     private static string BuildPlayerHelp()
